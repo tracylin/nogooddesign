@@ -177,12 +177,16 @@ async function pushState(deployId, entries) {
   const url = buildUrl(deployId);
   if (!url) return;
   try {
+    const enriched = entries.map(e => ({
+      ...e,
+      soldItemNames: (e.soldCatalogIds || []).map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; }).join(", "),
+    }));
     await fetch(url, {
       method: "POST", mode: "no-cors",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action: "setState",
-        state: { entries, lastModified: new Date().toISOString() },
+        state: { entries: enriched, lastModified: new Date().toISOString() },
       }),
     });
   } catch (e) { console.warn("Push failed:", e); }
@@ -204,7 +208,7 @@ async function pushLog(deployId, entry, action) {
           engage: entry.engage || "",
           amount: entry.amount || "",
           items: entry.items || "",
-          soldCatalogIds: (entry.soldCatalogIds || []).join(", "),
+          soldItemNames: (entry.soldCatalogIds || []).map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; }).join(", "),
           payment: entry.payment || "",
           note: entry.note || "",
           raw: JSON.stringify(entry),
@@ -246,7 +250,6 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("All");
   const [showCatalogPicker, setShowCatalogPicker] = useState(null);
-  const [pickerSearch, setPickerSearch] = useState("");
   const [pickerCat, setPickerCat] = useState("All");
   const [syncStatus, setSyncStatus] = useState("");
   const entriesRef = useRef(entries);
@@ -337,7 +340,9 @@ export default function App() {
       if (e.id !== entryId) return e;
       const ids = e.soldCatalogIds || [];
       const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
-      return { ...e, soldCatalogIds: next, ts: new Date().toISOString() };
+      const sum = next.reduce((s, id) => { const c = CATALOG.find(x => x.id === id); return s + (c?.price || 0); }, 0);
+      const autoPrice = (!e.amount || e.amount === "0") ? String(sum) : e.amount;
+      return { ...e, soldCatalogIds: next, amount: autoPrice, ts: new Date().toISOString() };
     }));
   }, []);
 
@@ -373,14 +378,12 @@ export default function App() {
 
       {/* CATALOG PICKER MODAL */}
       {showCatalogPicker !== null && (
-        <div style={S.overlay} onClick={() => { setShowCatalogPicker(null); setPickerSearch(""); setPickerCat("All"); }}>
+        <div style={S.overlay} onClick={() => { setShowCatalogPicker(null); setPickerCat("All"); }}>
           <div style={S.pickerModal} onClick={e => e.stopPropagation()}>
             <div style={S.pickerHead}>
               <span style={S.pickerTitle}>What sold?</span>
-              <button style={S.closeBtn} onClick={() => { setShowCatalogPicker(null); setPickerSearch(""); setPickerCat("All"); }}>✕</button>
+              <button style={S.closeBtn} onClick={() => { setShowCatalogPicker(null); setPickerCat("All"); }}>✕</button>
             </div>
-            <div style={S.rule} />
-            <input style={S.pickerSearch} value={pickerSearch} onChange={e => setPickerSearch(e.target.value)} placeholder="Search name or category…" autoFocus />
             <div style={S.rule} />
             <div style={S.catRow}>
               {CATEGORIES.map(c => (
@@ -389,11 +392,7 @@ export default function App() {
             </div>
             <div style={S.rule} />
             <div style={S.pickerList}>
-              {CATALOG.filter(c => {
-                const matchCat = pickerCat === "All" || c.category === pickerCat;
-                const matchSearch = !pickerSearch || c.name.toLowerCase().includes(pickerSearch.toLowerCase()) || c.category.toLowerCase().includes(pickerSearch.toLowerCase());
-                return matchCat && matchSearch;
-              }).map(item => {
+              {CATALOG.filter(c => pickerCat === "All" || c.category === pickerCat).map(item => {
                 const entry = entries.find(e => e.id === showCatalogPicker);
                 const isSelected = entry?.soldCatalogIds?.includes(item.id);
                 const isSoldByOther = allSoldIds.has(item.id) && !isSelected;
@@ -410,7 +409,7 @@ export default function App() {
                 );
               })}
             </div>
-            <button style={S.pickerDoneBtn} onClick={() => { setShowCatalogPicker(null); setPickerSearch(""); setPickerCat("All"); }}>Done</button>
+            <button style={S.pickerDoneBtn} onClick={() => { setShowCatalogPicker(null); setPickerCat("All"); }}>Done</button>
           </div>
         </div>
       )}
@@ -546,43 +545,45 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
         ))}
       </div>
       {isBought && (
-        <div style={S.saleBox}>
-          <div style={S.saleRow}>
-            <span style={S.dollar}>$</span>
-            <input style={S.saleInput} type="number" inputMode="decimal" value={entry.amount}
-              onChange={e => onUpdate(entry.id, "amount", e.target.value)} placeholder="0" autoFocus />
+        <>
+          <div style={S.saleBox}>
+            <div style={S.saleRow}>
+              <span style={S.dollar}>$</span>
+              <input style={S.saleInput} type="number" inputMode="decimal" value={entry.amount}
+                onChange={e => onUpdate(entry.id, "amount", e.target.value)} placeholder="0" autoFocus />
+            </div>
+            {soldItems.length === 0 ? (
+              <button style={S.catalogPickBtn} onClick={onPickCatalog}>Select items from catalog</button>
+            ) : (
+              <div style={S.catalogPickRow}>
+                <span style={S.catalogPickText}>{soldItems.length} item{soldItems.length > 1 ? "s" : ""} selected</span>
+                <button style={S.editLink} onClick={onPickCatalog}>edit</button>
+              </div>
+            )}
+            {soldItems.length > 0 && (
+              <div style={S.soldList}>
+                {soldItems.map(item => (
+                  <div key={item.id} style={S.soldItem}>
+                    <div style={S.soldThumb}>
+                      {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : null}
+                    </div>
+                    <span style={S.soldName}>{item.name}</span>
+                    <span style={S.soldPrice}>${item.price}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <input style={S.saleItemInput} value={entry.items}
+              onChange={e => onUpdate(entry.id, "items", e.target.value)}
+              placeholder='or type freehand — "bag + 2 charms"' />
           </div>
-          <div style={S.payRow}>
+          <div style={S.payBox}>
             {["Venmo", "Zelle", "Cash"].map(m => (
               <button key={m} onClick={() => onUpdate(entry.id, "payment", m)}
                 style={entry.payment === m ? S.payActive : S.payBtn}>{m}</button>
             ))}
           </div>
-          {soldItems.length === 0 ? (
-            <button style={S.catalogPickBtn} onClick={onPickCatalog}>Select items from catalog</button>
-          ) : (
-            <div style={S.catalogPickRow}>
-              <span style={S.catalogPickText}>{soldItems.length} item{soldItems.length > 1 ? "s" : ""} selected</span>
-              <button style={S.editLink} onClick={onPickCatalog}>edit</button>
-            </div>
-          )}
-          {soldItems.length > 0 && (
-            <div style={S.soldList}>
-              {soldItems.map(item => (
-                <div key={item.id} style={S.soldItem}>
-                  <div style={S.soldThumb}>
-                    {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : null}
-                  </div>
-                  <span style={S.soldName}>{item.name}</span>
-                  <span style={S.soldPrice}>${item.price}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          <input style={S.saleItemInput} value={entry.items}
-            onChange={e => onUpdate(entry.id, "items", e.target.value)}
-            placeholder='or type freehand — "bag + 2 charms"' />
-        </div>
+        </>
       )}
       <input style={S.noteInput} value={entry.note}
         onChange={e => onUpdate(entry.id, "note", e.target.value)} placeholder="note (optional)" />
@@ -711,7 +712,7 @@ const S = {
     flex: 1, background: "transparent", border: "none", color: BK,
     fontSize: 28, fontFamily: SERIF, outline: "none", width: "100%",
   },
-  payRow: { display: "flex", gap: 0, borderTop: `1px solid ${BK}` },
+  payBox: { display: "flex", gap: 0, border: `1px solid ${BK}`, marginBottom: 12 },
   payBtn: {
     flex: 1, padding: "8px 0", background: BG, border: "none", borderRight: `1px solid ${BK}`,
     fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer",
@@ -811,10 +812,6 @@ const S = {
   pickerModal: { background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430, maxHeight: "80dvh", display: "flex", flexDirection: "column" },
   pickerHead: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px" },
   pickerTitle: { fontFamily: SERIF, fontSize: 18, color: BK },
-  pickerSearch: {
-    width: "100%", background: "transparent", border: "none", color: BK,
-    fontSize: 16, fontFamily: MONO, padding: "12px 20px", outline: "none", boxSizing: "border-box",
-  },
   pickerList: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
   pickerItem: { display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
   pickerCheck: { fontSize: 14, width: 20, flexShrink: 0, fontFamily: MONO },
