@@ -231,7 +231,7 @@ async function pullState(deployId) {
 
 // ─── PERSON ICON ───
 const PersonIcon = () => (
-  <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="8" r="3.5" />
     <path d="M5.5 21v-1a6.5 6.5 0 0 1 13 0v1" />
     <line x1="21" y1="11.5" x2="21" y2="16.5" />
@@ -239,7 +239,12 @@ const PersonIcon = () => (
   </svg>
 );
 
-// ─── MAIN APP ───
+const GearIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
 export default function App() {
   const [tab, setTab] = useState("count");
   const [entries, setEntries] = useState([]);
@@ -340,9 +345,9 @@ export default function App() {
       if (e.id !== entryId) return e;
       const ids = e.soldCatalogIds || [];
       const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
-      const sum = next.reduce((s, id) => { const c = CATALOG.find(x => x.id === id); return s + (c?.price || 0); }, 0);
-      const autoPrice = (!e.amount || e.amount === "0") ? String(sum) : e.amount;
-      return { ...e, soldCatalogIds: next, amount: autoPrice, ts: new Date().toISOString() };
+      const sum = next.reduce((total, cid) => { const c = CATALOG.find(x => x.id === cid); return total + (c?.price || 0); }, 0);
+      const shouldAutoFill = !e.amount || e.amount === "";
+      return { ...e, soldCatalogIds: next, amount: shouldAutoFill ? String(sum) : e.amount, ts: new Date().toISOString() };
     }));
   }, []);
 
@@ -439,11 +444,11 @@ export default function App() {
 
       {/* HEADER */}
       <div style={S.header}>
-        <span style={S.logo}>No Good Design Co.</span>
+        <span style={S.logo}>NGD</span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {syncStatus && <span style={S.syncBadge}>{syncStatus}</span>}
-          {totalRevenue > 0 && <span style={S.revBadge}>${totalRevenue}</span>}
-          <button style={S.gearBtn} onClick={() => setShowSettings(true)}>⚙</button>
+          {boughtCount > 0 && <span style={S.headerStat}>{boughtCount} sold · ${totalRevenue}</span>}
+          <button style={S.gearBtn} onClick={() => setShowSettings(true)}><GearIcon /></button>
         </div>
       </div>
       <div style={S.rule} />
@@ -456,19 +461,10 @@ export default function App() {
               <button style={S.roundBtn} onClick={addEntry}><PersonIcon /></button>
             </div>
             <button style={S.undoBtn} onClick={undoEntry}>undo</button>
-            {boughtCount > 0 && (
-              <div style={S.statsRow}>
-                <span style={S.stat}>{boughtCount} sold</span>
-                <span style={S.stat}>·</span>
-                <span style={S.stat}>${totalRevenue} rev</span>
-                <span style={S.stat}>·</span>
-                <span style={S.stat}>{totalCount > 0 ? Math.round((boughtCount / totalCount) * 100) : 0}%</span>
-              </div>
-            )}
           </div>
           <div style={S.rule} />
           <div style={S.feed}>
-            {entries.length === 0 && <div style={S.empty}>Tap when someone stops at the table</div>}
+            {entries.length === 0 && <div style={S.empty}>No one is here yet</div>}
             {entries.map(entry => (
               expandedId === entry.id ? (
                 <ExpandedEntry key={entry.id} entry={entry} onUpdate={updateEntry}
@@ -512,7 +508,6 @@ function CollapsedEntry({ entry, onTap }) {
           <span style={{ ...S.tag, ...(isBought ? S.tagBought : {}) }}>{entry.engage}</span>
         )}
         {hasSale && <span style={S.saleAmt}>${entry.amount}</span>}
-        {entry.payment && <span style={S.payTag}>{entry.payment}</span>}
         {soldNames.length > 0 && <span style={S.itemsPrev}>{soldNames.join(", ").slice(0, 28)}{soldNames.join(", ").length > 28 ? "…" : ""}</span>}
         {entry.items && !soldNames.length && <span style={S.itemsPrev}>{entry.items.slice(0, 22)}{entry.items.length > 22 ? "…" : ""}</span>}
         {entry.note && !hasSale && <span style={S.notePrev}>{entry.note.slice(0, 20)}{entry.note.length > 20 ? "…" : ""}</span>}
@@ -653,36 +648,34 @@ const S = {
     background: BG, color: BK, fontFamily: MONO, fontSize: 13, overflow: "hidden",
     WebkitFontSmoothing: "antialiased", position: "relative",
   },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px 14px" },
-  logo: { fontFamily: SERIF, fontSize: 20, fontWeight: 400, color: BK },
-  revBadge: { fontFamily: MONO, fontSize: 12, fontWeight: 500, color: BK, border: `1px solid ${BK}`, padding: "2px 8px" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px" },
+  logo: { fontFamily: MONO, fontSize: 13, fontWeight: 500, color: BK, letterSpacing: "0.08em" },
+  headerStat: { fontFamily: MONO, fontSize: 11, color: BK },
   syncBadge: { fontSize: 10, color: BK },
-  gearBtn: { background: "none", border: "none", color: BK, fontSize: 18, cursor: "pointer", padding: 2 },
+  gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   rule: { height: 1, background: BK, flexShrink: 0 },
   nav: { display: "flex", flexShrink: 0 },
   navBtn: {
-    flex: 1, padding: "12px 0", background: BG, border: "none", borderRight: `1px solid ${BK}`,
+    flex: 1, padding: "18px 0", background: BG, border: "none", borderRight: `1px solid ${BK}`,
     fontFamily: MONO, fontSize: 13, color: BK, cursor: "pointer",
   },
   navActive: {
-    flex: 1, padding: "12px 0", background: BK, border: "none", borderRight: `1px solid ${BK}`,
+    flex: 1, padding: "18px 0", background: BK, border: "none", borderRight: `1px solid ${BK}`,
     fontFamily: MONO, fontSize: 13, color: BG, cursor: "pointer", fontWeight: 500,
   },
   content: { flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" },
-  counterArea: { textAlign: "center", padding: "28px 20px 16px", flexShrink: 0 },
-  bigNum: { fontFamily: SERIF, fontSize: 96, color: BK, lineHeight: 0.9, marginBottom: 24 },
+  counterArea: { textAlign: "center", padding: "32px 20px 16px", flexShrink: 0 },
+  bigNum: { fontFamily: SERIF, fontSize: 80, color: BK, lineHeight: 1, marginBottom: 28 },
   btnRow: { display: "flex", justifyContent: "center" },
   roundBtn: {
-    width: 80, height: 80, borderRadius: "50%", background: BK, border: "none",
+    width: 140, height: 140, borderRadius: "50%", background: BK, border: "none",
     display: "flex", alignItems: "center", justifyContent: "center",
     cursor: "pointer", WebkitTapHighlightColor: "transparent",
   },
   undoBtn: {
     background: "none", border: "none", color: "#999", fontFamily: MONO, fontSize: 10,
-    cursor: "pointer", marginTop: 10, padding: "4px 12px", textTransform: "uppercase", letterSpacing: "0.1em",
+    cursor: "pointer", marginTop: 12, padding: "4px 12px", textTransform: "uppercase", letterSpacing: "0.1em",
   },
-  statsRow: { display: "flex", justifyContent: "center", gap: 8, marginTop: 10 },
-  stat: { fontSize: 11, color: BK },
   feed: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
   entryRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
   entryLeft: { display: "flex", gap: 8, alignItems: "center", flexShrink: 0 },
@@ -735,7 +728,6 @@ const S = {
     background: "none", border: "none", fontFamily: MONO, fontSize: 11,
     color: BK, cursor: "pointer", textDecoration: "underline",
   },
-  payTag: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "1px 5px" },
   soldList: { padding: "4px 14px 8px" },
   soldItem: { display: "flex", alignItems: "center", gap: 8, padding: "4px 0" },
   soldThumb: { width: 28, height: 28, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
@@ -822,5 +814,5 @@ const S = {
     width: "100%", padding: "14px 0", background: BK, border: "none",
     fontFamily: MONO, fontSize: 13, color: BG, fontWeight: 500, cursor: "pointer", flexShrink: 0,
   },
-  empty: { textAlign: "center", color: BK, padding: "40px 20px", fontSize: 13, fontFamily: SERIF, fontStyle: "italic" },
+  empty: { textAlign: "center", color: "#999", padding: "40px 20px", fontSize: 13, fontFamily: SERIF, fontStyle: "italic" },
 };
