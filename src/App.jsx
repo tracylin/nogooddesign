@@ -205,6 +205,7 @@ async function pushLog(deployId, entry, action) {
           amount: entry.amount || "",
           items: entry.items || "",
           soldCatalogIds: (entry.soldCatalogIds || []).join(", "),
+          payment: entry.payment || "",
           note: entry.note || "",
           raw: JSON.stringify(entry),
         },
@@ -294,13 +295,14 @@ export default function App() {
   const addEntry = useCallback(() => {
     const now = new Date();
     const time = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-    const entry = { id: nextId, time, engage: "", amount: "", items: "", soldCatalogIds: [], note: "", ts: now.toISOString() };
+    const newId = entries.length > 0 ? Math.max(...entries.map(e => e.id)) + 1 : 1;
+    const entry = { id: newId, time, engage: "", amount: "", items: "", soldCatalogIds: [], payment: "", note: "", ts: now.toISOString() };
     const newEntries = [entry, ...entries];
     setEntries(newEntries);
-    setExpandedId(nextId);
-    setNextId(prev => prev + 1);
+    setExpandedId(newId);
+    setNextId(newId + 1);
     pushUpdate(newEntries, entry, "add");
-  }, [nextId, entries, pushUpdate]);
+  }, [entries, pushUpdate]);
 
   const undoEntry = useCallback(() => {
     if (entries.length === 0) return;
@@ -308,7 +310,6 @@ export default function App() {
     const newEntries = entries.slice(1);
     setEntries(newEntries);
     setExpandedId(null);
-    setNextId(prev => Math.max(prev - 1, 1));
     pushUpdate(newEntries, removed, "undo");
   }, [entries, pushUpdate]);
 
@@ -367,7 +368,6 @@ export default function App() {
         body { background: #fff; }
         input::placeholder { color: #999; }
         input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
-        input { font-size: 16px !important; }
         ::-webkit-scrollbar { width: 0; }
       `}</style>
 
@@ -410,6 +410,7 @@ export default function App() {
                 );
               })}
             </div>
+            <button style={S.pickerDoneBtn} onClick={() => { setShowCatalogPicker(null); setPickerSearch(""); setPickerCat("All"); }}>Done</button>
           </div>
         </div>
       )}
@@ -445,12 +446,6 @@ export default function App() {
           {totalRevenue > 0 && <span style={S.revBadge}>${totalRevenue}</span>}
           <button style={S.gearBtn} onClick={() => setShowSettings(true)}>⚙</button>
         </div>
-      </div>
-      <div style={S.rule} />
-
-      <div style={S.nav}>
-        <button style={tab === "count" ? S.navActive : S.navBtn} onClick={() => setTab("count")}>Counter</button>
-        <button style={tab === "price" ? S.navActive : S.navBtn} onClick={() => setTab("price")}>Price check</button>
       </div>
       <div style={S.rule} />
 
@@ -490,6 +485,12 @@ export default function App() {
           <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} allSoldIds={allSoldIds} />
         </div>
       )}
+
+      <div style={S.rule} />
+      <div style={S.nav}>
+        <button style={tab === "count" ? S.navActive : S.navBtn} onClick={() => setTab("count")}>Counter</button>
+        <button style={tab === "price" ? S.navActive : S.navBtn} onClick={() => setTab("price")}>Price check</button>
+      </div>
     </div>
   );
 }
@@ -512,6 +513,7 @@ function CollapsedEntry({ entry, onTap }) {
           <span style={{ ...S.tag, ...(isBought ? S.tagBought : {}) }}>{entry.engage}</span>
         )}
         {hasSale && <span style={S.saleAmt}>${entry.amount}</span>}
+        {entry.payment && <span style={S.payTag}>{entry.payment}</span>}
         {soldNames.length > 0 && <span style={S.itemsPrev}>{soldNames.join(", ").slice(0, 28)}{soldNames.join(", ").length > 28 ? "…" : ""}</span>}
         {entry.items && !soldNames.length && <span style={S.itemsPrev}>{entry.items.slice(0, 22)}{entry.items.length > 22 ? "…" : ""}</span>}
         {entry.note && !hasSale && <span style={S.notePrev}>{entry.note.slice(0, 20)}{entry.note.length > 20 ? "…" : ""}</span>}
@@ -550,9 +552,20 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
             <input style={S.saleInput} type="number" inputMode="decimal" value={entry.amount}
               onChange={e => onUpdate(entry.id, "amount", e.target.value)} placeholder="0" autoFocus />
           </div>
-          <button style={S.catalogPickBtn} onClick={onPickCatalog}>
-            {soldItems.length === 0 ? "Select items from catalog" : `${soldItems.length} item${soldItems.length > 1 ? "s" : ""} selected`}
-          </button>
+          <div style={S.payRow}>
+            {["Venmo", "Zelle", "Cash"].map(m => (
+              <button key={m} onClick={() => onUpdate(entry.id, "payment", m)}
+                style={entry.payment === m ? S.payActive : S.payBtn}>{m}</button>
+            ))}
+          </div>
+          {soldItems.length === 0 ? (
+            <button style={S.catalogPickBtn} onClick={onPickCatalog}>Select items from catalog</button>
+          ) : (
+            <div style={S.catalogPickRow}>
+              <span style={S.catalogPickText}>{soldItems.length} item{soldItems.length > 1 ? "s" : ""} selected</span>
+              <button style={S.editLink} onClick={onPickCatalog}>edit</button>
+            </div>
+          )}
           {soldItems.length > 0 && (
             <div style={S.soldList}>
               {soldItems.map(item => (
@@ -698,11 +711,30 @@ const S = {
     flex: 1, background: "transparent", border: "none", color: BK,
     fontSize: 28, fontFamily: SERIF, outline: "none", width: "100%",
   },
+  payRow: { display: "flex", gap: 0, borderTop: `1px solid ${BK}` },
+  payBtn: {
+    flex: 1, padding: "8px 0", background: BG, border: "none", borderRight: `1px solid ${BK}`,
+    fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer",
+  },
+  payActive: {
+    flex: 1, padding: "8px 0", background: BK, border: "none", borderRight: `1px solid ${BK}`,
+    fontFamily: MONO, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer",
+  },
   catalogPickBtn: {
     width: "100%", padding: "10px 14px", background: BG, border: "none",
     fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer", textAlign: "left",
     borderTop: `1px solid ${BK}`,
   },
+  catalogPickRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "10px 14px", borderTop: `1px solid ${BK}`,
+  },
+  catalogPickText: { fontFamily: MONO, fontSize: 12, color: BK },
+  editLink: {
+    background: "none", border: "none", fontFamily: MONO, fontSize: 11,
+    color: BK, cursor: "pointer", textDecoration: "underline",
+  },
+  payTag: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "1px 5px" },
   soldList: { padding: "4px 14px 8px" },
   soldItem: { display: "flex", alignItems: "center", gap: 8, padding: "4px 0" },
   soldThumb: { width: 28, height: 28, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
@@ -710,11 +742,11 @@ const S = {
   soldPrice: { fontSize: 12, color: BK, fontWeight: 500 },
   saleItemInput: {
     width: "100%", background: "transparent", border: "none", borderTop: `1px solid ${BK}`, color: BK,
-    fontSize: 13, fontFamily: MONO, padding: "10px 14px", outline: "none", boxSizing: "border-box",
+    fontSize: 16, fontFamily: MONO, padding: "10px 14px", outline: "none", boxSizing: "border-box",
   },
   noteInput: {
     width: "100%", background: BG, border: `1px solid ${BK}`, color: BK,
-    fontSize: 13, fontFamily: MONO, padding: "10px 14px", outline: "none", marginBottom: 10, boxSizing: "border-box",
+    fontSize: 16, fontFamily: MONO, padding: "10px 14px", outline: "none", marginBottom: 10, boxSizing: "border-box",
   },
   doneBtn: {
     background: "none", border: `1px solid ${BK}`, padding: "4px 14px",
@@ -728,7 +760,7 @@ const S = {
   searchWrap: { display: "flex", alignItems: "center", padding: "0 20px" },
   searchInput: {
     flex: 1, background: "transparent", border: "none", color: BK,
-    fontSize: 15, fontFamily: SERIF, padding: "14px 0", outline: "none",
+    fontSize: 16, fontFamily: SERIF, padding: "14px 0", outline: "none",
   },
   clearBtn: { background: "none", border: "none", color: BK, fontSize: 16, cursor: "pointer", padding: "4px 0 4px 8px" },
   catRow: { display: "flex", gap: 0, flexShrink: 0, overflowX: "auto", WebkitOverflowScrolling: "touch" },
@@ -766,7 +798,7 @@ const S = {
   label: { fontSize: 10, color: BK, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6, marginTop: 14, display: "block" },
   modalInput: {
     width: "100%", background: "transparent", border: `1px solid ${BK}`, color: BK,
-    fontSize: 13, fontFamily: MONO, padding: "10px", outline: "none", boxSizing: "border-box",
+    fontSize: 16, fontFamily: MONO, padding: "10px", outline: "none", boxSizing: "border-box",
   },
   hint: { fontSize: 10, color: "#999", lineHeight: 1.4, marginTop: 6 },
   connectedText: { fontSize: 11, color: BK, fontWeight: 500, marginTop: 8, marginBottom: 8 },
@@ -781,7 +813,7 @@ const S = {
   pickerTitle: { fontFamily: SERIF, fontSize: 18, color: BK },
   pickerSearch: {
     width: "100%", background: "transparent", border: "none", color: BK,
-    fontSize: 14, fontFamily: MONO, padding: "12px 20px", outline: "none", boxSizing: "border-box",
+    fontSize: 16, fontFamily: MONO, padding: "12px 20px", outline: "none", boxSizing: "border-box",
   },
   pickerList: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
   pickerItem: { display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
@@ -789,5 +821,9 @@ const S = {
   pickerThumb: { width: 36, height: 36, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
   pickerName: { flex: 1, fontSize: 12, color: BK },
   pickerPrice: { fontSize: 14, fontFamily: SERIF, color: BK, flexShrink: 0 },
+  pickerDoneBtn: {
+    width: "100%", padding: "14px 0", background: BK, border: "none",
+    fontFamily: MONO, fontSize: 13, color: BG, fontWeight: 500, cursor: "pointer", flexShrink: 0,
+  },
   empty: { textAlign: "center", color: BK, padding: "40px 20px", fontSize: 13, fontFamily: SERIF, fontStyle: "italic" },
 };
