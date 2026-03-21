@@ -158,19 +158,39 @@ const CATEGORIES = ["All", "Hats", "Bags", "Charms", "Belts", "Rings", "Bracelet
 const ENGAGEMENTS = ["Stopped", "Touched", "Asked", "Bought"];
 
 // ─── SYNC ENGINE ───
-const SYNC_INTERVAL = 60000;
+const SYNC_INTERVAL = 20000; // 20s — faster polling
 const BASE_URL = "https://script.google.com/macros/s/";
 function buildUrl(deployId) { return deployId ? BASE_URL + deployId + "/exec" : ""; }
 
-function mergeEntries(local, remote) {
+function mergeEntries(local, remote, deletedIds) {
   const map = new Map();
-  local.forEach(e => map.set(e.id, e));
-  remote.forEach(e => {
+  // Remote is source of truth for what exists
+  remote.forEach(e => map.set(e.id, e));
+  // Local additions and updates
+  local.forEach(e => {
+    if (deletedIds.has(e.id)) return; // skip locally deleted
     const existing = map.get(e.id);
-    if (!existing) { map.set(e.id, e); }
-    else if (e.ts > existing.ts) { map.set(e.id, e); }
+    if (!existing) { map.set(e.id, e); } // new local entry
+    else if (e.ts > existing.ts) { map.set(e.id, e); } // local is newer
   });
+  // Remove anything in deletedIds
+  deletedIds.forEach(id => map.delete(id));
   return Array.from(map.values()).sort((a, b) => b.id - a.id);
+}
+
+// Debounced push — waits 500ms after last call before firing
+let pushTimer = null;
+let pushQueue = null;
+
+function debouncedPush(deployId, entries) {
+  pushQueue = { deployId, entries };
+  if (pushTimer) clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => {
+    if (pushQueue) {
+      pushState(pushQueue.deployId, pushQueue.entries);
+      pushQueue = null;
+    }
+  }, 500);
 }
 
 async function pushState(deployId, entries) {
@@ -183,7 +203,7 @@ async function pushState(deployId, entries) {
     }));
     await fetch(url, {
       method: "POST", mode: "no-cors",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({
         action: "setState",
         state: { entries: enriched, lastModified: new Date().toISOString() },
@@ -198,7 +218,7 @@ async function pushLog(deployId, entry, action) {
   try {
     await fetch(url, {
       method: "POST", mode: "no-cors",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({
         action: "log",
         row: {
@@ -222,7 +242,7 @@ async function pullState(deployId) {
   const url = buildUrl(deployId);
   if (!url) return null;
   try {
-    const res = await fetch(url + "?action=getState");
+    const res = await fetch(url + "?action=getState&t=" + Date.now()); // cache-bust
     if (!res.ok) return null;
     const data = await res.json();
     return data?.entries || null;
@@ -247,36 +267,48 @@ export default function App() {
   const [showCatalogPicker, setShowCatalogPicker] = useState(null);
   const [pickerCat, setPickerCat] = useState("All");
   const [syncStatus, setSyncStatus] = useState("");
+  const [deletedIds, setDeletedIds] = useState(new Set());
   const entriesRef = useRef(entries);
+  const deletedRef = useRef(deletedIds);
   entriesRef.current = entries;
+  deletedRef.current = deletedIds;
 
-  // Load saved state
+  // Load from localStorage (persists across tabs, sessions, reloads)
   useEffect(() => {
     try {
-      const saved = window.sessionStorage?.getItem?.("ngd_entries");
+      const saved = localStorage.getItem("ngd_entries");
       if (saved) { const p = JSON.parse(saved); setEntries(p); setNextId(p.length > 0 ? Math.max(...p.map(e => e.id)) + 1 : 1); }
     } catch {}
-    try { const u = window.sessionStorage?.getItem?.("ngd_deploy_id"); if (u) setDeployId(u); } catch {}
+    try { const u = localStorage.getItem("ngd_deploy_id"); if (u) setDeployId(u); } catch {}
+    try { const d = localStorage.getItem("ngd_deleted"); if (d) setDeletedIds(new Set(JSON.parse(d))); } catch {}
   }, []);
 
-  // Save local
-  useEffect(() => { try { window.sessionStorage?.setItem?.("ngd_entries", JSON.stringify(entries)); } catch {} }, [entries]);
-  useEffect(() => { try { window.sessionStorage?.setItem?.("ngd_deploy_id", deployId); } catch {} }, [deployId]);
+  // Save to localStorage on every change
+  useEffect(() => { try { localStorage.setItem("ngd_entries", JSON.stringify(entries)); } catch {} }, [entries]);
+  useEffect(() => { try { localStorage.setItem("ngd_deploy_id", deployId); } catch {} }, [deployId]);
+  useEffect(() => { try { localStorage.setItem("ngd_deleted", JSON.stringify([...deletedIds])); } catch {} }, [deletedIds]);
 
-  // Pull on open + interval
+  // Pull from sheet, merge with local
   const doSync = useCallback(async () => {
     if (!deployId) return;
     setSyncStatus("syncing…");
-    const remote = await pullState(deployId);
-    if (remote && Array.isArray(remote)) {
-      const merged = mergeEntries(entriesRef.current, remote);
-      setEntries(merged);
-      setNextId(merged.length > 0 ? Math.max(...merged.map(e => e.id)) + 1 : 1);
+    try {
+      const remote = await pullState(deployId);
+      if (remote && Array.isArray(remote)) {
+        const merged = mergeEntries(entriesRef.current, remote, deletedRef.current);
+        setEntries(merged);
+        setNextId(merged.length > 0 ? Math.max(...merged.map(e => e.id)) + 1 : 1);
+        setSyncStatus("synced");
+      } else {
+        setSyncStatus("sync failed");
+      }
+    } catch {
+      setSyncStatus("sync failed");
     }
-    setSyncStatus("synced");
     setTimeout(() => setSyncStatus(""), 2000);
   }, [deployId]);
 
+  // Sync on open + every 20s
   useEffect(() => {
     if (!deployId) return;
     doSync();
@@ -284,9 +316,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, [deployId, doSync]);
 
-  // Push on every change
+  // Sync when app comes back to foreground (tab switch, phone unlock)
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") doSync(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [doSync]);
+
+  // Push: debounced state + immediate log
   const pushUpdate = useCallback((newEntries, changedEntry, action) => {
-    pushState(deployId, newEntries);
+    debouncedPush(deployId, newEntries);
     if (changedEntry) pushLog(deployId, changedEntry, action);
   }, [deployId]);
 
@@ -308,6 +347,7 @@ export default function App() {
     const newEntries = entries.slice(1);
     setEntries(newEntries);
     setExpandedId(null);
+    setDeletedIds(prev => new Set([...prev, removed.id]));
     pushUpdate(newEntries, removed, "undo");
   }, [entries, pushUpdate]);
 
@@ -316,6 +356,7 @@ export default function App() {
     const newEntries = entries.filter(e => e.id !== id);
     setEntries(newEntries);
     setExpandedId(null);
+    setDeletedIds(prev => new Set([...prev, id]));
     pushUpdate(newEntries, removed, "delete");
   }, [entries, pushUpdate]);
 
@@ -351,7 +392,7 @@ export default function App() {
   const totalRevenue = entries.reduce((s, e) => { const a = parseFloat(e.amount); return s + (isNaN(a) ? 0 : a); }, 0);
 
   const exportData = () => { navigator.clipboard?.writeText?.(JSON.stringify(entries, null, 2)); alert("Copied"); };
-  const clearData = () => { if (confirm("Clear all data?")) { setEntries([]); setNextId(1); setExpandedId(null); pushState(deployId, []); } };
+  const clearData = () => { if (confirm("Clear all data?")) { setEntries([]); setNextId(1); setExpandedId(null); setDeletedIds(new Set()); pushState(deployId, []); } };
 
   const filteredCatalog = CATALOG.filter(item => {
     const matchCat = catFilter === "All" || item.category === catFilter;
@@ -422,7 +463,7 @@ export default function App() {
             <label style={S.label}>Google Sheets Deployment ID</label>
             <input style={S.modalInput} value={deployId} onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
             <p style={S.hint}>Apps Script → Deploy → Web app → copy the ID from the URL</p>
-            {deployId && <p style={S.connectedText}>Connected · syncs every 60s</p>}
+            {deployId && <p style={S.connectedText}>Connected · syncs every 20s + on focus</p>}
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={() => { doSync(); setShowSettings(false); }}>Sync now</button>
