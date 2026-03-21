@@ -229,18 +229,8 @@ async function pullState(deployId) {
   } catch (e) { console.warn("Pull failed:", e); return null; }
 }
 
-// ─── PERSON ICON ───
-const PersonIcon = () => (
-  <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="8" r="3.5" />
-    <path d="M5.5 21v-1a6.5 6.5 0 0 1 13 0v1" />
-    <line x1="21" y1="11.5" x2="21" y2="16.5" />
-    <line x1="18.5" y1="14" x2="23.5" y2="14" />
-  </svg>
-);
-
 const GearIcon = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#1a1a1a" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="3" />
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
@@ -345,9 +335,10 @@ export default function App() {
       if (e.id !== entryId) return e;
       const ids = e.soldCatalogIds || [];
       const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
-      const sum = next.reduce((total, cid) => { const c = CATALOG.find(x => x.id === cid); return total + (c?.price || 0); }, 0);
-      const shouldAutoFill = !e.amount || e.amount === "";
-      return { ...e, soldCatalogIds: next, amount: shouldAutoFill ? String(sum) : e.amount, ts: new Date().toISOString() };
+      const oldSum = ids.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
+      const newSum = next.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
+      const wasAutoFilled = !e.amount || e.amount === "" || e.amount === String(oldSum);
+      return { ...e, soldCatalogIds: next, amount: wasAutoFilled ? String(newSum) : e.amount, ts: new Date().toISOString() };
     }));
   }, []);
 
@@ -373,10 +364,10 @@ export default function App() {
   return (
     <div style={S.shell}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif&family=DM+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Instrument+Serif&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #fff; }
-        input::placeholder { color: #999; }
+        body { background: #ece8e1; }
+        input::placeholder { color: #a09a92; }
         input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
         ::-webkit-scrollbar { width: 0; }
       `}</style>
@@ -444,7 +435,7 @@ export default function App() {
 
       {/* HEADER */}
       <div style={S.header}>
-        <span style={S.logo}>NGD</span>
+        <span style={S.logo}>NO GOOD DESIGN CO.</span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {syncStatus && <span style={S.syncBadge}>{syncStatus}</span>}
           {boughtCount > 0 && <span style={S.headerStat}>{boughtCount} sold · ${totalRevenue}</span>}
@@ -458,7 +449,7 @@ export default function App() {
           <div style={S.counterArea}>
             <div style={S.bigNum}>{totalCount}</div>
             <div style={S.btnRow}>
-              <button style={S.roundBtn} onClick={addEntry}><PersonIcon /></button>
+              <button style={S.roundBtn} onClick={addEntry}><span style={S.btnSymbol}>✲</span></button>
             </div>
             <button style={S.undoBtn} onClick={undoEntry}>undo</button>
           </div>
@@ -636,67 +627,71 @@ function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, allSo
   );
 }
 
-// ─── STYLES: BLACK & WHITE ONLY ───
-const BG = "#fff";
-const BK = "#000";
+// ─── STYLES ───
+const BG = "#ece8e1";
+const BK = "#1a1a1a";
+const SANS = "'DM Sans', 'Helvetica Neue', Helvetica, sans-serif";
 const SERIF = "'Instrument Serif', 'Georgia', serif";
-const MONO = "'DM Mono', 'Menlo', monospace";
 
 const S = {
   shell: {
     maxWidth: 430, margin: "0 auto", height: "100dvh", display: "flex", flexDirection: "column",
-    background: BG, color: BK, fontFamily: MONO, fontSize: 13, overflow: "hidden",
+    background: BG, color: BK, fontFamily: SANS, fontSize: 13, overflow: "hidden",
     WebkitFontSmoothing: "antialiased", position: "relative",
   },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px" },
-  logo: { fontFamily: MONO, fontSize: 13, fontWeight: 500, color: BK, letterSpacing: "0.08em" },
-  headerStat: { fontFamily: MONO, fontSize: 11, color: BK },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px" },
+  logo: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: BK, letterSpacing: "0.12em", textTransform: "uppercase" },
+  headerStat: { fontFamily: SANS, fontSize: 11, color: BK },
   syncBadge: { fontSize: 10, color: BK },
   gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   rule: { height: 1, background: BK, flexShrink: 0 },
   nav: { display: "flex", flexShrink: 0 },
   navBtn: {
     flex: 1, padding: "18px 0", background: BG, border: "none", borderRight: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 13, color: BK, cursor: "pointer",
+    fontFamily: SANS, fontSize: 13, color: BK, cursor: "pointer",
   },
   navActive: {
     flex: 1, padding: "18px 0", background: BK, border: "none", borderRight: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 13, color: BG, cursor: "pointer", fontWeight: 500,
+    fontFamily: SANS, fontSize: 13, color: BG, cursor: "pointer", fontWeight: 500,
   },
   content: { flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" },
-  counterArea: { textAlign: "center", padding: "32px 20px 16px", flexShrink: 0 },
-  bigNum: { fontFamily: SERIF, fontSize: 80, color: BK, lineHeight: 1, marginBottom: 28 },
+  counterArea: {
+    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+    flex: "0 0 auto", padding: "32px 20px 12px",
+  },
+  bigNum: { fontFamily: SERIF, fontSize: 72, color: BK, lineHeight: 1, marginBottom: 24 },
   btnRow: { display: "flex", justifyContent: "center" },
   roundBtn: {
     width: 140, height: 140, borderRadius: "50%", background: BK, border: "none",
     display: "flex", alignItems: "center", justifyContent: "center",
     cursor: "pointer", WebkitTapHighlightColor: "transparent",
   },
+  btnSymbol: { fontSize: 52, color: BG, lineHeight: 1 },
   undoBtn: {
-    background: "none", border: "none", color: "#999", fontFamily: MONO, fontSize: 10,
-    cursor: "pointer", marginTop: 12, padding: "4px 12px", textTransform: "uppercase", letterSpacing: "0.1em",
+    background: "none", border: "none", color: "#a09a92", fontFamily: SANS, fontSize: 10,
+    cursor: "pointer", marginTop: 14, padding: "4px 12px", textTransform: "uppercase", letterSpacing: "0.1em",
   },
   feed: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
   entryRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
   entryLeft: { display: "flex", gap: 8, alignItems: "center", flexShrink: 0 },
   entryRight: { display: "flex", gap: 8, alignItems: "center", justifyContent: "flex-end", flex: 1, overflow: "hidden" },
-  entryNum: { fontSize: 10, color: BK, fontWeight: 500 },
+  entryNum: { fontSize: 10, color: "#a09a92", fontWeight: 500 },
   entryTime: { fontSize: 11, color: BK },
-  dots: { color: BK, fontSize: 11, letterSpacing: 3 },
+  dots: { color: "#a09a92", fontSize: 11, letterSpacing: 3 },
   tag: { fontSize: 11, padding: "2px 8px", border: `1px solid ${BK}`, color: BK },
   tagBought: { background: BK, color: BG, border: `1px solid ${BK}` },
   saleAmt: { fontWeight: 500, fontSize: 13, color: BK },
   itemsPrev: { color: BK, fontSize: 10, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" },
-  notePrev: { color: BK, fontSize: 10, fontStyle: "italic", overflow: "hidden", whiteSpace: "nowrap" },
+  notePrev: { color: "#a09a92", fontSize: 10, fontStyle: "italic", overflow: "hidden", whiteSpace: "nowrap" },
   entryExpanded: { padding: "16px 20px 12px", background: BG, borderLeft: `4px solid ${BK}`, borderBottom: `1px solid ${BK}` },
   pillRow: { display: "flex", gap: 0, marginBottom: 14 },
   pill: {
     flex: 1, padding: "10px 0", background: BG, border: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer", marginRight: -1,
+    fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer", marginRight: -1,
   },
   pillActive: {
     flex: 1, padding: "10px 0", background: BK, border: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer", marginRight: -1,
+    fontFamily: SANS, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer", marginRight: -1,
   },
   saleBox: { border: `1px solid ${BK}`, marginBottom: 12, background: BG },
   saleRow: { display: "flex", alignItems: "center", padding: "10px 14px" },
@@ -708,24 +703,24 @@ const S = {
   payBox: { display: "flex", gap: 0, border: `1px solid ${BK}`, marginBottom: 12 },
   payBtn: {
     flex: 1, padding: "8px 0", background: BG, border: "none", borderRight: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer",
+    fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer",
   },
   payActive: {
     flex: 1, padding: "8px 0", background: BK, border: "none", borderRight: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer",
+    fontFamily: SANS, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer",
   },
   catalogPickBtn: {
     width: "100%", padding: "10px 14px", background: BG, border: "none",
-    fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer", textAlign: "left",
+    fontFamily: SANS, fontSize: 12, color: "#a09a92", cursor: "pointer", textAlign: "left",
     borderTop: `1px solid ${BK}`,
   },
   catalogPickRow: {
     display: "flex", justifyContent: "space-between", alignItems: "center",
     padding: "10px 14px", borderTop: `1px solid ${BK}`,
   },
-  catalogPickText: { fontFamily: MONO, fontSize: 12, color: BK },
+  catalogPickText: { fontFamily: SANS, fontSize: 12, color: BK },
   editLink: {
-    background: "none", border: "none", fontFamily: MONO, fontSize: 11,
+    background: "none", border: "none", fontFamily: SANS, fontSize: 11,
     color: BK, cursor: "pointer", textDecoration: "underline",
   },
   soldList: { padding: "4px 14px 8px" },
@@ -735,50 +730,50 @@ const S = {
   soldPrice: { fontSize: 12, color: BK, fontWeight: 500 },
   saleItemInput: {
     width: "100%", background: "transparent", border: "none", borderTop: `1px solid ${BK}`, color: BK,
-    fontSize: 16, fontFamily: MONO, padding: "10px 14px", outline: "none", boxSizing: "border-box",
+    fontSize: 16, fontFamily: SANS, padding: "10px 14px", outline: "none", boxSizing: "border-box",
   },
   noteInput: {
     width: "100%", background: BG, border: `1px solid ${BK}`, color: BK,
-    fontSize: 16, fontFamily: MONO, padding: "10px 14px", outline: "none", marginBottom: 10, boxSizing: "border-box",
+    fontSize: 16, fontFamily: SANS, padding: "10px 14px", outline: "none", marginBottom: 10, boxSizing: "border-box",
   },
   doneBtn: {
     background: "none", border: `1px solid ${BK}`, padding: "4px 14px",
-    fontFamily: MONO, fontSize: 11, color: BK, cursor: "pointer",
+    fontFamily: SANS, fontSize: 11, color: BK, cursor: "pointer",
   },
   deleteBtn: {
     background: "none", border: "none", padding: "4px 8px",
-    fontFamily: MONO, fontSize: 10, color: BK, cursor: "pointer", textDecoration: "underline",
+    fontFamily: SANS, fontSize: 10, color: "#a09a92", cursor: "pointer", textDecoration: "underline",
   },
   priceWrap: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
   searchWrap: { display: "flex", alignItems: "center", padding: "0 20px" },
   searchInput: {
     flex: 1, background: "transparent", border: "none", color: BK,
-    fontSize: 16, fontFamily: SERIF, padding: "14px 0", outline: "none",
+    fontSize: 16, fontFamily: SANS, padding: "14px 0", outline: "none",
   },
   clearBtn: { background: "none", border: "none", color: BK, fontSize: 16, cursor: "pointer", padding: "4px 0 4px 8px" },
   catRow: { display: "flex", gap: 0, flexShrink: 0, overflowX: "auto", WebkitOverflowScrolling: "touch" },
   catBtn: {
     flex: "none", padding: "10px 16px", background: BG, border: "none", borderRight: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer", whiteSpace: "nowrap",
+    fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer", whiteSpace: "nowrap",
   },
   catActive: {
     flex: "none", padding: "10px 16px", background: BK, border: "none", borderRight: `1px solid ${BK}`,
-    fontFamily: MONO, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap",
+    fontFamily: SANS, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap",
   },
   catalogScroll: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
-  catHeader: { fontFamily: SERIF, fontSize: 18, color: BK, padding: "0 20px", lineHeight: "36px" },
-  catItem: { display: "flex", alignItems: "center", gap: 14, padding: "8px 20px", borderBottom: `1px solid ${BK}` },
+  catHeader: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: "#a09a92", padding: "10px 20px 6px", letterSpacing: "0.08em", textTransform: "uppercase" },
+  catItem: { display: "flex", alignItems: "center", gap: 14, padding: "10px 20px", borderBottom: `1px solid ${BK}` },
   thumb: { width: 52, height: 52, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
   thumbImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
   thumbFallback: {
     width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center",
-    background: BK, color: BG, fontFamily: SERIF, fontSize: 16,
+    background: BK, color: BG, fontFamily: SANS, fontSize: 14,
   },
   catItemInfo: { flex: 1, display: "flex", flexDirection: "column", gap: 2 },
   catItemName: { fontSize: 13, color: BK, display: "flex", alignItems: "center", gap: 6 },
-  qtyTag: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "0 4px" },
-  soldTag: { fontSize: 10, color: BK, fontWeight: 500, letterSpacing: "0.05em" },
-  addonText: { fontSize: 10, color: BK },
+  qtyTag: { fontSize: 10, color: "#a09a92", border: `1px solid ${BK}`, padding: "0 4px" },
+  soldTag: { fontSize: 10, color: "#a09a92", fontWeight: 500, letterSpacing: "0.05em", textTransform: "uppercase" },
+  addonText: { fontSize: 10, color: "#a09a92" },
   catItemPrice: { fontFamily: SERIF, fontSize: 22, color: BK, flexShrink: 0 },
   overlay: {
     position: "fixed", inset: 0, background: BK, display: "flex",
@@ -786,33 +781,33 @@ const S = {
   },
   modal: { background: BG, borderTop: `1px solid ${BK}`, padding: "20px 20px 32px", width: "100%", maxWidth: 430 },
   modalHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 },
-  modalTitle: { fontFamily: SERIF, fontSize: 18, color: BK },
+  modalTitle: { fontFamily: SANS, fontSize: 16, fontWeight: 500, color: BK },
   closeBtn: { background: "none", border: "none", color: BK, fontSize: 18, cursor: "pointer" },
-  label: { fontSize: 10, color: BK, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6, marginTop: 14, display: "block" },
+  label: { fontSize: 10, color: "#a09a92", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6, marginTop: 14, display: "block" },
   modalInput: {
     width: "100%", background: "transparent", border: `1px solid ${BK}`, color: BK,
-    fontSize: 16, fontFamily: MONO, padding: "10px", outline: "none", boxSizing: "border-box",
+    fontSize: 16, fontFamily: SANS, padding: "10px", outline: "none", boxSizing: "border-box",
   },
-  hint: { fontSize: 10, color: "#999", lineHeight: 1.4, marginTop: 6 },
+  hint: { fontSize: 10, color: "#a09a92", lineHeight: 1.4, marginTop: 6 },
   connectedText: { fontSize: 11, color: BK, fontWeight: 500, marginTop: 8, marginBottom: 8 },
   modalBtnRow: { display: "flex", gap: 0, marginTop: 16 },
   modalBtn: {
     flex: 1, padding: "10px", background: "transparent", border: `1px solid ${BK}`, marginRight: -1,
-    fontFamily: MONO, fontSize: 12, color: BK, cursor: "pointer",
+    fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer",
   },
   // PICKER
   pickerModal: { background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430, maxHeight: "80dvh", display: "flex", flexDirection: "column" },
   pickerHead: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px" },
-  pickerTitle: { fontFamily: SERIF, fontSize: 18, color: BK },
+  pickerTitle: { fontFamily: SANS, fontSize: 16, fontWeight: 500, color: BK },
   pickerList: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
-  pickerItem: { display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
-  pickerCheck: { fontSize: 14, width: 20, flexShrink: 0, fontFamily: MONO },
+  pickerItem: { display: "flex", alignItems: "center", gap: 10, padding: "10px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
+  pickerCheck: { fontSize: 14, width: 20, flexShrink: 0 },
   pickerThumb: { width: 36, height: 36, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
   pickerName: { flex: 1, fontSize: 12, color: BK },
   pickerPrice: { fontSize: 14, fontFamily: SERIF, color: BK, flexShrink: 0 },
   pickerDoneBtn: {
     width: "100%", padding: "14px 0", background: BK, border: "none",
-    fontFamily: MONO, fontSize: 13, color: BG, fontWeight: 500, cursor: "pointer", flexShrink: 0,
+    fontFamily: SANS, fontSize: 13, color: BG, fontWeight: 500, cursor: "pointer", flexShrink: 0,
   },
-  empty: { textAlign: "center", color: "#999", padding: "40px 20px", fontSize: 13, fontFamily: SERIF, fontStyle: "italic" },
+  empty: { textAlign: "center", color: "#a09a92", padding: "40px 20px", fontSize: 13, fontFamily: SANS, fontStyle: "italic" },
 };
