@@ -323,10 +323,10 @@ export default function App() {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [doSync]);
 
-  // Push: debounced state + immediate log
+  // Push: UPLOAD DISABLED — log only, no state overwrite
   const pushUpdate = useCallback((newEntries, changedEntry, action) => {
-    debouncedPush(deployId, newEntries);
-    if (changedEntry) pushLog(deployId, changedEntry, action);
+    // debouncedPush(deployId, newEntries); // DISABLED — protect sheet data
+    if (changedEntry) pushLog(deployId, changedEntry, action); // log still works
   }, [deployId]);
 
   const addEntry = useCallback(() => {
@@ -392,7 +392,7 @@ export default function App() {
   const totalRevenue = entries.reduce((s, e) => { const a = parseFloat(e.amount); return s + (isNaN(a) ? 0 : a); }, 0);
 
   const exportData = () => { navigator.clipboard?.writeText?.(JSON.stringify(entries, null, 2)); alert("Copied"); };
-  const clearData = () => { if (confirm("Clear all data?")) { setEntries([]); setNextId(1); setExpandedId(null); setDeletedIds(new Set()); pushState(deployId, []); } };
+  const clearData = () => { if (confirm("Clear local data? Sheet is safe.")) { setEntries([]); setNextId(1); setExpandedId(null); setDeletedIds(new Set()); } };
 
   const filteredCatalog = CATALOG.filter(item => {
     const matchCat = catFilter === "All" || item.category === catFilter;
