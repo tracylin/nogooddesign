@@ -308,20 +308,20 @@ export default function App() {
     setTimeout(() => setSyncStatus(""), 2000);
   }, [deployId]);
 
-  // Sync on open + every 20s
-  useEffect(() => {
-    if (!deployId) return;
-    doSync();
-    const interval = setInterval(doSync, SYNC_INTERVAL);
-    return () => clearInterval(interval);
-  }, [deployId, doSync]);
+  // Sync on open + every 20s — DISABLED, manual only
+  // useEffect(() => {
+  //   if (!deployId) return;
+  //   doSync();
+  //   const interval = setInterval(doSync, SYNC_INTERVAL);
+  //   return () => clearInterval(interval);
+  // }, [deployId, doSync]);
 
-  // Sync when app comes back to foreground (tab switch, phone unlock)
-  useEffect(() => {
-    const onVisible = () => { if (document.visibilityState === "visible") doSync(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [doSync]);
+  // Sync when app comes back to foreground — DISABLED, manual only
+  // useEffect(() => {
+  //   const onVisible = () => { if (document.visibilityState === "visible") doSync(); };
+  //   document.addEventListener("visibilitychange", onVisible);
+  //   return () => document.removeEventListener("visibilitychange", onVisible);
+  // }, [doSync]);
 
   // Push: UPLOAD DISABLED — log only, no state overwrite
   const pushUpdate = useCallback((newEntries, changedEntry, action) => {
@@ -463,10 +463,10 @@ export default function App() {
             <label style={S.label}>Google Sheets Deployment ID</label>
             <input style={S.modalInput} value={deployId} onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
             <p style={S.hint}>Apps Script → Deploy → Web app → copy the ID from the URL</p>
-            {deployId && <p style={S.connectedText}>Connected · syncs every 20s + on focus</p>}
+            {deployId && <p style={S.connectedText}>Connected · manual sync only</p>}
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={() => { doSync(); setShowSettings(false); }}>Sync now</button>
+              <button style={S.modalBtn} onClick={() => { doSync(); setShowSettings(false); }}>Download from sheet</button>
               <button style={S.modalBtn} onClick={exportData}>Export</button>
               <button style={S.modalBtn} onClick={clearData}>Clear</button>
             </div>
