@@ -268,6 +268,7 @@ export default function App() {
   const [pickerCat, setPickerCat] = useState("All");
   const [syncStatus, setSyncStatus] = useState("");
   const [deletedIds, setDeletedIds] = useState(new Set());
+  const [syncDiffs, setSyncDiffs] = useState(null); // { diffs: [...], remote: [...], direction: "down"|"up" }
   const entriesRef = useRef(entries);
   const deletedRef = useRef(deletedIds);
   entriesRef.current = entries;
@@ -288,45 +289,114 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem("ngd_deploy_id", deployId); } catch {} }, [deployId]);
   useEffect(() => { try { localStorage.setItem("ngd_deleted", JSON.stringify([...deletedIds])); } catch {} }, [deletedIds]);
 
-  // Pull from sheet, merge with local
-  const doSync = useCallback(async () => {
+  // Compute diffs between local and remote
+  const computeDiffs = useCallback((local, remote) => {
+    const localMap = new Map(local.map(e => [e.id, e]));
+    const remoteMap = new Map(remote.map(e => [e.id, e]));
+    const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
+    const diffs = [];
+
+    allIds.forEach(id => {
+      const l = localMap.get(id);
+      const r = remoteMap.get(id);
+      const deleted = deletedIds.has(id);
+
+      if (l && r) {
+        // Exists on both — check if different
+        if (l.ts !== r.ts || l.engage !== r.engage || l.amount !== r.amount || l.note !== r.note ||
+            JSON.stringify(l.soldCatalogIds) !== JSON.stringify(r.soldCatalogIds) || l.payment !== r.payment) {
+          diffs.push({ id, type: "conflict", local: l, remote: r, keep: l.ts >= r.ts ? "local" : "remote" });
+        }
+      } else if (l && !r) {
+        if (deleted) {
+          diffs.push({ id, type: "deleted_local", local: l, keep: "delete" });
+        } else {
+          diffs.push({ id, type: "local_only", local: l, keep: "keep" });
+        }
+      } else if (!l && r) {
+        if (deleted) {
+          diffs.push({ id, type: "deleted_local_exists_remote", remote: r, keep: "delete" });
+        } else {
+          diffs.push({ id, type: "remote_only", remote: r, keep: "keep" });
+        }
+      }
+    });
+
+    return diffs.sort((a, b) => b.id - a.id);
+  }, [deletedIds]);
+
+  // Start sync review (download or upload)
+  const startSyncReview = useCallback(async (direction) => {
     if (!deployId) return;
-    setSyncStatus("syncing…");
+    setSyncStatus("loading…");
+    setShowSettings(false);
     try {
       const remote = await pullState(deployId);
-      if (remote && Array.isArray(remote)) {
-        const merged = mergeEntries(entriesRef.current, remote, deletedRef.current);
-        setEntries(merged);
-        setNextId(merged.length > 0 ? Math.max(...merged.map(e => e.id)) + 1 : 1);
-        setSyncStatus("synced");
-      } else {
-        setSyncStatus("sync failed");
+      const remoteEntries = (remote && Array.isArray(remote)) ? remote : [];
+      const diffs = computeDiffs(entries, remoteEntries);
+      if (diffs.length === 0) {
+        setSyncStatus("No differences");
+        setTimeout(() => setSyncStatus(""), 2000);
+        return;
       }
+      setSyncDiffs({ diffs, remote: remoteEntries, direction });
+      setSyncStatus("");
     } catch {
       setSyncStatus("sync failed");
+      setTimeout(() => setSyncStatus(""), 2000);
     }
+  }, [deployId, entries, computeDiffs]);
+
+  // Apply resolved diffs
+  const applyDiffs = useCallback(async () => {
+    if (!syncDiffs) return;
+    const localMap = new Map(entries.map(e => [e.id, e]));
+    const remoteMap = new Map(syncDiffs.remote.map(e => [e.id, e]));
+    const result = new Map();
+    const newDeletedIds = new Set(deletedIds);
+
+    // Start with entries that had no diffs
+    const diffIds = new Set(syncDiffs.diffs.map(d => d.id));
+    entries.forEach(e => { if (!diffIds.has(e.id)) result.set(e.id, e); });
+    syncDiffs.remote.forEach(e => { if (!diffIds.has(e.id) && !result.has(e.id)) result.set(e.id, e); });
+
+    // Apply each diff resolution
+    syncDiffs.diffs.forEach(d => {
+      if (d.keep === "delete") {
+        newDeletedIds.add(d.id);
+        // don't add to result
+      } else if (d.keep === "local") {
+        if (d.local) result.set(d.id, d.local);
+      } else if (d.keep === "remote") {
+        if (d.remote) result.set(d.id, d.remote);
+      } else if (d.keep === "keep") {
+        const entry = d.local || d.remote;
+        if (entry) result.set(d.id, entry);
+      } else if (d.keep === "discard") {
+        // don't add
+      }
+    });
+
+    const merged = Array.from(result.values()).sort((a, b) => b.id - a.id);
+    setEntries(merged);
+    setDeletedIds(newDeletedIds);
+    setNextId(merged.length > 0 ? Math.max(...merged.map(e => e.id)) + 1 : 1);
+
+    // Always push resolved state to sheet
+    await pushState(deployId, merged);
+
+    setSyncDiffs(null);
+    setSyncStatus("synced");
     setTimeout(() => setSyncStatus(""), 2000);
-  }, [deployId]);
+  }, [syncDiffs, entries, deletedIds, deployId]);
 
-  // Sync on open + every 20s — DISABLED, manual only
-  // useEffect(() => {
-  //   if (!deployId) return;
-  //   doSync();
-  //   const interval = setInterval(doSync, SYNC_INTERVAL);
-  //   return () => clearInterval(interval);
-  // }, [deployId, doSync]);
+  // Legacy doSync kept for compatibility
+  const doSync = useCallback(async () => { startSyncReview("down"); }, [startSyncReview]);
+  const doUpload = useCallback(async () => { startSyncReview("up"); }, [startSyncReview]);
 
-  // Sync when app comes back to foreground — DISABLED, manual only
-  // useEffect(() => {
-  //   const onVisible = () => { if (document.visibilityState === "visible") doSync(); };
-  //   document.addEventListener("visibilitychange", onVisible);
-  //   return () => document.removeEventListener("visibilitychange", onVisible);
-  // }, [doSync]);
-
-  // Push: UPLOAD DISABLED — log only, no state overwrite
+  // Log only, no auto-push
   const pushUpdate = useCallback((newEntries, changedEntry, action) => {
-    // debouncedPush(deployId, newEntries); // DISABLED — protect sheet data
-    if (changedEntry) pushLog(deployId, changedEntry, action); // log still works
+    if (changedEntry) pushLog(deployId, changedEntry, action);
   }, [deployId]);
 
   const addEntry = useCallback(() => {
@@ -413,6 +483,88 @@ export default function App() {
         ::-webkit-scrollbar { width: 0; }
       `}</style>
 
+      {/* SYNC DIFF REVIEW MODAL */}
+      {syncDiffs && (
+        <div style={S.overlay} onClick={() => setSyncDiffs(null)}>
+          <div style={S.diffModal} onClick={e => e.stopPropagation()}>
+            <div style={S.pickerHead}>
+              <span style={S.pickerTitle}>Sync review</span>
+              <button style={S.closeBtn} onClick={() => setSyncDiffs(null)}>✕</button>
+            </div>
+            <div style={S.rule} />
+            <div style={S.diffCount}>{syncDiffs.diffs.length} difference{syncDiffs.diffs.length !== 1 ? "s" : ""} found</div>
+            <div style={S.rule} />
+            <div style={S.diffList}>
+              {syncDiffs.diffs.map(d => (
+                <div key={d.id} style={S.diffItem}>
+                  <div style={S.diffHeader}>
+                    <span style={S.diffId}>#{d.id}</span>
+                    <span style={S.diffType}>
+                      {d.type === "conflict" && "different on both sides"}
+                      {d.type === "local_only" && "local only — not on sheet"}
+                      {d.type === "remote_only" && "sheet only — not on phone"}
+                      {d.type === "deleted_local" && "deleted locally"}
+                      {d.type === "deleted_local_exists_remote" && "deleted locally, still on sheet"}
+                    </span>
+                  </div>
+                  {d.type === "conflict" && (
+                    <div style={S.diffDetail}>
+                      <div style={S.diffSide}>Local: {d.local.engage || "—"} {d.local.amount ? "$" + d.local.amount : ""} {d.local.note || ""}</div>
+                      <div style={S.diffSide}>Sheet: {d.remote.engage || "—"} {d.remote.amount ? "$" + d.remote.amount : ""} {d.remote.note || ""}</div>
+                    </div>
+                  )}
+                  {(d.type === "local_only" || d.type === "deleted_local") && d.local && (
+                    <div style={S.diffDetail}>
+                      <div style={S.diffSide}>{d.local.engage || "—"} {d.local.amount ? "$" + d.local.amount : ""} {d.local.note || ""}</div>
+                    </div>
+                  )}
+                  {(d.type === "remote_only" || d.type === "deleted_local_exists_remote") && d.remote && (
+                    <div style={S.diffDetail}>
+                      <div style={S.diffSide}>{d.remote.engage || "—"} {d.remote.amount ? "$" + d.remote.amount : ""} {d.remote.note || ""}</div>
+                    </div>
+                  )}
+                  <div style={S.diffActions}>
+                    {d.type === "conflict" && (
+                      <>
+                        <button style={d.keep === "local" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "local" } : x) }))}>Use local</button>
+                        <button style={d.keep === "remote" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "remote" } : x) }))}>Use sheet</button>
+                      </>
+                    )}
+                    {d.type === "local_only" && (
+                      <>
+                        <button style={d.keep === "keep" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "keep" } : x) }))}>Keep</button>
+                        <button style={d.keep === "discard" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "discard" } : x) }))}>Discard</button>
+                      </>
+                    )}
+                    {d.type === "remote_only" && (
+                      <>
+                        <button style={d.keep === "keep" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "keep" } : x) }))}>Keep</button>
+                        <button style={d.keep === "discard" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "discard" } : x) }))}>Discard</button>
+                      </>
+                    )}
+                    {(d.type === "deleted_local" || d.type === "deleted_local_exists_remote") && (
+                      <>
+                        <button style={d.keep === "delete" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "delete" } : x) }))}>Delete</button>
+                        <button style={d.keep === "keep" ? S.diffBtnActive : S.diffBtn}
+                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "keep" } : x) }))}>Restore</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button style={S.pickerDoneBtn} onClick={applyDiffs}>Apply {syncDiffs.diffs.length} changes</button>
+          </div>
+        </div>
+      )}
+
       {/* CATALOG PICKER MODAL */}
       {showCatalogPicker !== null && (
         <div style={S.overlay} onClick={() => { setShowCatalogPicker(null); setPickerCat("All"); }}>
@@ -466,9 +618,11 @@ export default function App() {
             {deployId && <p style={S.connectedText}>Connected · manual sync only</p>}
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={() => { doSync(); setShowSettings(false); }}>Download from sheet</button>
-              <button style={S.modalBtn} onClick={exportData}>Export</button>
-              <button style={S.modalBtn} onClick={clearData}>Clear</button>
+              <button style={S.modalBtn} onClick={() => { startSyncReview("sync"); setShowSettings(false); }}>Sync with sheet</button>
+            </div>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={exportData}>Export JSON</button>
+              <button style={S.modalBtn} onClick={clearData}>Clear local</button>
             </div>
           </div>
         </div>
@@ -851,4 +1005,23 @@ const S = {
     fontFamily: SANS, fontSize: 13, color: BG, fontWeight: 500, cursor: "pointer", flexShrink: 0,
   },
   empty: { textAlign: "center", color: "#a09a92", padding: "40px 20px", fontSize: 13, fontFamily: SANS, fontStyle: "italic" },
+  // DIFF REVIEW
+  diffModal: { background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430, maxHeight: "85dvh", display: "flex", flexDirection: "column" },
+  diffCount: { padding: "10px 20px", fontFamily: SANS, fontSize: 12, color: BK },
+  diffList: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
+  diffItem: { padding: "12px 20px", borderBottom: `1px solid ${BK}` },
+  diffHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 },
+  diffId: { fontFamily: SANS, fontSize: 13, fontWeight: 500, color: BK },
+  diffType: { fontFamily: SANS, fontSize: 10, color: "#a09a92" },
+  diffDetail: { marginBottom: 8 },
+  diffSide: { fontFamily: SANS, fontSize: 11, color: BK, padding: "2px 0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  diffActions: { display: "flex", gap: 0 },
+  diffBtn: {
+    flex: 1, padding: "7px 0", background: BG, border: `1px solid ${BK}`,
+    fontFamily: SANS, fontSize: 11, color: BK, cursor: "pointer", marginRight: -1,
+  },
+  diffBtnActive: {
+    flex: 1, padding: "7px 0", background: BK, border: `1px solid ${BK}`,
+    fontFamily: SANS, fontSize: 11, color: BG, fontWeight: 500, cursor: "pointer", marginRight: -1,
+  },
 };
