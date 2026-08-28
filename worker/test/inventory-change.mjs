@@ -38,8 +38,8 @@ const picked = await page.evaluate(() => {
   for (const r of rows.slice(0, 2)) { r.click(); names.push(r.textContent); }
   return names;
 });
-await page.getByRole("button", { name: "Done" }).click();
-await page.getByRole("button", { name: "done" }).click();
+await page.getByRole("button", { name: "Done", exact: true }).click();
+await page.getByRole("button", { name: "done", exact: true }).click();
 await page.waitForTimeout(600);
 
 const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("ngd_entries"))[0]);
