@@ -1,0 +1,4 @@
+node_modules/
+# Local wrangler state: the miniflare sqlite used by `npm run dev`
+.wrangler/
+.dev.vars
