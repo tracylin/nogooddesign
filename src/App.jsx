@@ -186,7 +186,10 @@ function withIdentity(e) {
 }
 
 // ─── SYNC ENGINE ───
-const SYNC_INTERVAL = 20000; // 20s
+// Fast enough that the other phone updates while you are still looking at it.
+// Polling only runs while the app is on screen, so this costs less than the old
+// 20s timer that ran regardless.
+const SYNC_INTERVAL = 4000;
 const BASE_URL = "https://script.google.com/macros/s/";
 function buildUrl(deployId) { return deployId ? BASE_URL + deployId + "/exec" : ""; }
 
@@ -484,6 +487,8 @@ export default function App() {
     try { localStorage.setItem("ngd_dirty", JSON.stringify([...dirty])); } catch { /* storage unavailable, carry on */ }
   }, [dirty]);
 
+  const syncConfigured = Boolean(syncUrl && stallKey && market);
+
   const markDirty = useCallback((uid) => {
     setDirty(prev => (prev.has(uid) ? prev : new Set(prev).add(uid)));
   }, []);
@@ -533,23 +538,43 @@ export default function App() {
     setTimeout(() => setSyncStatus(s => (s === "synced" ? "" : s)), 1500);
   }, []);
 
+  // Sync while the app is on screen, and the moment it comes back. Phone
+  // browsers freeze timers when the screen locks or you switch apps, which is
+  // why a background timer alone made it look like sync only worked on restart.
   useEffect(() => {
-    if (!syncUrl || !stallKey || !market) return;
-    const first = setTimeout(() => runSync(false), 300);
-    const t = setInterval(() => runSync(false), SYNC_INTERVAL);
-    return () => { clearTimeout(first); clearInterval(t); };
-  }, [syncUrl, stallKey, market, runSync]);
-
-  // Sync as soon as the phone comes back, rather than waiting out the timer.
-  useEffect(() => {
-    const wake = () => { if (document.visibilityState === "visible") runSync(false); };
-    window.addEventListener("online", wake);
-    document.addEventListener("visibilitychange", wake);
-    return () => {
-      window.removeEventListener("online", wake);
-      document.removeEventListener("visibilitychange", wake);
+    if (!syncConfigured) return;
+    let timer = null;
+    const start = () => { if (!timer) timer = setInterval(() => runSync(false), SYNC_INTERVAL); };
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    const resume = () => {
+      if (document.visibilityState === "hidden") { stop(); return; }
+      runSync(false);
+      start();
     };
-  }, [runSync]);
+    const first = setTimeout(() => runSync(false), 200);
+    start();
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("online", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("pageshow", resume);
+    return () => {
+      clearTimeout(first);
+      stop();
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("pageshow", resume);
+    };
+  }, [syncConfigured, runSync]);
+
+  // Anything changed here goes out almost immediately rather than waiting for
+  // the next tick. A failed send leaves the queue untouched, so this cannot
+  // spin while there is no signal.
+  useEffect(() => {
+    if (!syncConfigured || dirty.size === 0) return;
+    const t = setTimeout(() => runSync(false), 700);
+    return () => clearTimeout(t);
+  }, [dirty, syncConfigured, runSync]);
 
   const logAction = useCallback((entry, action) => {
     if (entry && deployId) pushLog(deployId, entry, action);
@@ -651,7 +676,6 @@ export default function App() {
   }, 0);
 
   const unsentCount = dirty.size;
-  const syncConfigured = Boolean(syncUrl && stallKey && market);
 
   const exportToSheet = async () => {
     if (!deployId) return;
@@ -793,7 +817,7 @@ export default function App() {
                   ? "Cannot reach sync: " + syncError
                   : unsentCount > 0
                     ? unsentCount + " waiting to send"
-                    : "Connected \u00b7 syncing every 20s"}
+                    : "Connected \u00b7 syncing live"}
               </p>
             )}
             <p style={S.hint}>This phone is {deviceId}</p>
