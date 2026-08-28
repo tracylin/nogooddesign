@@ -24,6 +24,9 @@
  */
 
 const MAX_ROWS = 500;
+// Bound values per statement are capped by D1, and the uid lookup is the only
+// place where one statement grows with the size of the push.
+const LOOKUP_CHUNK = 50;
 const MIN_STALL_KEY = 12; // the stall key is the namespace and the only secret
 
 const CORS = {
@@ -180,20 +183,25 @@ async function changesSince(db, stall, market, since) {
 // that loses the race is simply retried against the newer version.
 async function applyRows(db, stall, market, incoming, attempt = 0) {
 
-  const placeholders = incoming.map(() => "?").join(",");
-  const { results: existingRows } = await db
-    .prepare("SELECT uid, seq, rev, updated_at, deleted_at, body, field_ts FROM entries " +
-             `WHERE stall = ? AND market = ? AND uid IN (${placeholders})`)
-    .bind(stall, market, ...incoming.map(r => r.uid))
-    .all();
-
+  // D1 refuses a statement with too many bound values, so the lookup is asked
+  // in bites. A whole market day arriving at once, which is what a restore is,
+  // used to fail here with "too many SQL variables".
   const existing = new Map();
-  (existingRows || []).forEach(row => {
-    let body = {}, stamps = {};
-    try { body = JSON.parse(row.body); } catch { body = {}; }
-    try { stamps = row.field_ts ? JSON.parse(row.field_ts) : {}; } catch { stamps = {}; }
-    existing.set(row.uid, { ...row, parsed: body, stamps });
-  });
+  for (let i = 0; i < incoming.length; i += LOOKUP_CHUNK) {
+    const slice = incoming.slice(i, i + LOOKUP_CHUNK);
+    const placeholders = slice.map(() => "?").join(",");
+    const { results } = await db
+      .prepare("SELECT uid, seq, rev, updated_at, deleted_at, body, field_ts FROM entries " +
+               `WHERE stall = ? AND market = ? AND uid IN (${placeholders})`)
+      .bind(stall, market, ...slice.map(r => r.uid))
+      .all();
+    (results || []).forEach(row => {
+      let body = {}, stamps = {};
+      try { body = JSON.parse(row.body); } catch { body = {}; }
+      try { stamps = row.field_ts ? JSON.parse(row.field_ts) : {}; } catch { stamps = {}; }
+      existing.set(row.uid, { ...row, parsed: body, stamps });
+    });
+  }
 
   const fresh = incoming.filter(r => !existing.has(r.uid));
 

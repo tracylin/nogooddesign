@@ -223,5 +223,22 @@ check("the restore moves it back to 84", corrected[0].id === 84, corrected[0].id
 check("and it is still the same customer", corrected.length === 1 && corrected[0].uid === "c1", corrected);
 check("with the note that came with it", corrected[0].note === "same customer", corrected[0].note);
 
+console.log("\n18. A whole market day can be restored in one push");
+const BDAY = "2026-10-13";
+const bulk = Array.from({ length: 120 }, (_, n) => ({
+  ...entry("b" + (n + 1), "phoneA", { note: "customer " + (n + 1) }),
+  id: n + 1, keepNumber: true,
+}));
+const bulkRes = await push(BDAY, 0, bulk);
+check("the push is accepted", bulkRes.status === 200 && bulkRes.body.ok === true, bulkRes.body?.error);
+const bulkRows = (await pull(BDAY, 0)).body.rows;
+check("all 120 customers landed", bulkRows.length === 120, bulkRows.length);
+check("numbered 1 to 120 exactly",
+  bulkRows.map(r => r.id).sort((a, b) => a - b).join() === Array.from({ length: 120 }, (_, n) => n + 1).join(),
+  bulkRows.map(r => r.id).slice(0, 5));
+check("and pushing the same file again changes nothing",
+  (await push(BDAY, 0, bulk)).body.ok === true &&
+  (await pull(BDAY, 0)).body.rows.length === 120);
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);
