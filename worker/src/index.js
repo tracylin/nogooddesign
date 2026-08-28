@@ -52,9 +52,12 @@ function normalise(raw, nowMs) {
   if (!uid || uid.length > 128) return null;
   let updatedAt = typeof raw.ts === "string" && raw.ts ? raw.ts : new Date(0).toISOString();
   const claimed = Date.parse(updatedAt);
-  if (!Number.isFinite(claimed) || claimed > nowMs + MAX_CLOCK_SKEW_MS) {
-    updatedAt = new Date(nowMs).toISOString();
-  }
+  // A clamped row is one whose own idea of the time we do not believe. It is
+  // still stored, but it is never allowed to undo a deletion: bringing back an
+  // entry someone deleted is the worst thing this system can do, and a
+  // timestamp we do not trust is not good enough reason to do it.
+  const trusted = Number.isFinite(claimed) && claimed <= nowMs + MAX_CLOCK_SKEW_MS;
+  if (!trusted) updatedAt = new Date(nowMs).toISOString();
   return {
     uid,
     deviceId: typeof raw.deviceId === "string" ? raw.deviceId.slice(0, 64) : "",
@@ -62,6 +65,7 @@ function normalise(raw, nowMs) {
     updatedAt,
     deletedAt: typeof raw.deletedAt === "string" && raw.deletedAt ? raw.deletedAt : null,
     seqHint: Number.isInteger(raw.id) ? raw.id : null,
+    trusted,
     body: { ...raw, ts: updatedAt },
   };
 }
@@ -148,9 +152,13 @@ async function applyRows(db, stall, market, incoming) {
         "  body       = excluded.body " +
         // Last write wins, and a deletion wins a tie. Anything older than what
         // is already stored is ignored rather than overwriting it.
-        "WHERE excluded.updated_at > entries.updated_at " +
+        "WHERE (excluded.updated_at > entries.updated_at " +
         "   OR (excluded.updated_at = entries.updated_at " +
-        "       AND excluded.deleted_at IS NOT NULL AND entries.deleted_at IS NULL)"
+        "       AND excluded.deleted_at IS NOT NULL AND entries.deleted_at IS NULL))" +
+        // A row whose timestamp we had to clamp may not bring a deleted entry
+        // back to life.
+        (r.trusted ? "" :
+        "   AND NOT (entries.deleted_at IS NOT NULL AND excluded.deleted_at IS NULL)")
       )
       .bind(stall, market, r.uid, isNew ? seq : (r.seqHint ?? 0), r.deviceId,
             r.createdAt, r.updatedAt, r.deletedAt, rev, JSON.stringify(r.body));
