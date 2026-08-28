@@ -129,7 +129,39 @@ await push(DAY, 0, [entry("skew1", "goodphone", { ts: soon, note: "a normal late
 const after = (await pull(DAY, 0)).body.rows.find(r => r.uid === "skew1");
 check("a normal later edit still wins", after.note === "a normal later edit", after.note);
 
-console.log("\n11. Bad requests are refused");
+console.log("\n11. A day can be taken away as a file");
+const csvRes = await fetch(`${BASE}/export?stall=${encodeURIComponent(STALL)}&market=${DAY}&format=csv`);
+// Read the bytes, not text(): decoding to a string strips a leading byte order
+// mark by spec, so checking for it in the decoded text always fails.
+const csvBytes = new Uint8Array(await csvRes.clone().arrayBuffer());
+const csv = await csvRes.text();
+check("the CSV downloads rather than opening in the browser",
+  (csvRes.headers.get("content-disposition") || "").includes("attachment"), csvRes.headers.get("content-disposition"));
+check("it is named after the market day",
+  (csvRes.headers.get("content-disposition") || "").includes(DAY));
+check("it starts with a byte order mark so Excel reads the names",
+  csvBytes[0] === 0xef && csvBytes[1] === 0xbb && csvBytes[2] === 0xbf,
+  [csvBytes[0], csvBytes[1], csvBytes[2]]);
+check("it has a header row", csv.split("\r\n")[0].includes("number") && csv.includes("engagement"));
+const csvRows = csv.trim().split("\r\n").length - 1;
+check("every live customer is a row", csvRows > 0, csvRows);
+check("deleted customers are left out by default", !csv.includes("a2,"), csvRows);
+
+const jsonRes = await fetch(`${BASE}/export?stall=${encodeURIComponent(STALL)}&market=${DAY}&format=json`);
+const jsonBody = await jsonRes.json();
+check("JSON export carries the same day", jsonBody.market === DAY, jsonBody.market);
+check("and the same number of entries", jsonBody.entries.length === csvRows, [jsonBody.entries.length, csvRows]);
+
+console.log("\n12. Past market days can be found again");
+const listed = await (await fetch(`${BASE}/markets?stall=${encodeURIComponent(STALL)}`)).json();
+const days = listed.markets.map(m => m.market);
+check("both days this run created are listed", days.includes(DAY) && days.includes("2026-09-04"), days);
+check("newest day first", days[0] >= days[days.length - 1], days);
+check("each day carries a count", listed.markets.every(m => typeof m.entries === "number"), listed.markets[0]);
+check("a stranger's key sees nothing of this stall",
+  (await (await fetch(`${BASE}/markets?stall=someoneelsekey123`)).json()).markets.length === 0);
+
+console.log("\n13. Bad requests are refused");
 const shortKey = await fetch(`${BASE}/sync?stall=short&market=${DAY}&since=0`);
 check("a guessable stall key is rejected", shortKey.status === 400, shortKey.status);
 const noMarket = await fetch(`${BASE}/sync?stall=${STALL}&since=0`);
