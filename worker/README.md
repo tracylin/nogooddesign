@@ -96,6 +96,20 @@ Export links carry the stall key, so they end up in browser history. That key is
 what protects the stall: treat a shared export link the way you would a
 password.
 
+### Restoring keeps the customer numbers
+
+Customer numbers are normally the server's to give. A phone only ever suggests
+one, because two phones that both went offline at the same moment each believe
+their next customer is number 12, and honouring that would hand two different
+people the same number.
+
+A restore is the exception. The numbers in a backup are part of the record: the
+note in the spreadsheet says customer 84, so after a restore it has to still be
+customer 84. Rows in a restore push carry `keepNumber: true` alongside their
+`id`, and the server then uses that number, corrects it on a row that is already
+here, and pulls its own counter past the highest one it saw so nobody arriving
+later is handed it a second time. The flag is not stored on the row.
+
 ## Costs
 
 A busy market day is a few hundred writes and a few thousand reads. The free

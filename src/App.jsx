@@ -628,6 +628,10 @@ export default function App() {
   const unsentCountRef = useRef(0);
   const cfgRef = useRef({ syncUrl, stallKey, market });
   const syncing = useRef(false);
+  // Uids that came back from a backup file and have not reached the server yet.
+  // Their customer numbers are part of the record, so the push that carries
+  // them asks the server to keep them rather than hand out new ones.
+  const restored = useRef(new Set());
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { unsentCountRef.current = dirty.size; }, [dirty]);
@@ -685,6 +689,7 @@ export default function App() {
       const outgoing = entriesRef.current.filter(e => queued.has(e.uid)).map(e => ({
         ...e,
         soldItemNames: soldNamesOf(e),
+        ...(restored.current.has(e.uid) ? { keepNumber: true } : {}),
       }));
       const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
 
@@ -708,7 +713,7 @@ export default function App() {
         const next = new Set(prev);
         sentAt.forEach((ts, uid) => {
           const now = entriesRef.current.find(e => e.uid === uid);
-          if (!now || now.ts === ts) next.delete(uid);
+          if (!now || now.ts === ts) { next.delete(uid); restored.current.delete(uid); }
         });
         return next;
       });
@@ -987,6 +992,7 @@ export default function App() {
         imported.forEach(e => next.add(e.uid));
         return next;
       });
+      imported.forEach(e => restored.current.add(e.uid));
       setSyncStatus("restored " + live);
       setTimeout(() => setSyncStatus(""), 3000);
     } catch (e) {
