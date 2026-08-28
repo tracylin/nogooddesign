@@ -590,6 +590,16 @@ export default function App() {
 
   const syncConfigured = Boolean(syncUrl && stallKey && market);
 
+  // While a panel is open the page behind is held still. On a phone the scroll
+  // otherwise chains through to it and the whole screen drifts.
+  const panelOpen = showSettings || showCatalogPicker !== null;
+  useEffect(() => {
+    if (!panelOpen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previous; };
+  }, [panelOpen]);
+
   const markDirty = useCallback((uid) => {
     setDirty(prev => (prev.has(uid) ? prev : new Set(prev).add(uid)));
   }, []);
@@ -1502,10 +1512,15 @@ const S = {
   },
   modal: {
     background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430,
-    maxHeight: "88dvh", display: "flex", flexDirection: "column",
+    // svh, not dvh: dvh grows and shrinks as the browser bar hides on a phone,
+    // which resizes the panel while you are scrolling it.
+    maxHeight: "88svh", display: "flex", flexDirection: "column",
   },
   modalBody: {
-    overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
+    overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain",
+    // Vertical gestures only. Without this a slightly diagonal swipe pans
+    // sideways as well as scrolling, which reads as the panel wobbling.
+    touchAction: "pan-y",
     padding: "0 20px 32px", flex: 1,
   },
   modalHead: {
@@ -1527,10 +1542,11 @@ const S = {
     fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer",
   },
   // PICKER
-  pickerModal: { background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430, maxHeight: "80dvh", display: "flex", flexDirection: "column" },
+  pickerModal: { background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430, maxHeight: "80svh", display: "flex", flexDirection: "column" },
   pickerHead: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px" },
   pickerTitle: { fontFamily: SANS, fontSize: 16, fontWeight: 500, color: BK },
-  pickerList: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
+  pickerList: {
+    touchAction: "pan-y", overflowX: "hidden", flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
   pickerItem: { display: "flex", alignItems: "center", gap: 10, padding: "10px 20px", cursor: "pointer", borderBottom: `1px solid ${BK}` },
   pickerCheck: { fontSize: 14, width: 20, flexShrink: 0 },
   pickerThumb: { width: 36, height: 36, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
