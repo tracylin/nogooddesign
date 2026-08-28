@@ -199,26 +199,6 @@ function sortEntries(arr) {
   });
 }
 
-// Last write wins per entry, keyed on uid. A deletion is just another version of
-// the entry, so it travels between devices like any other edit instead of being
-// trapped in one phone's local storage.
-function mergeEntries(local, remote) {
-  const map = new Map();
-  const put = (raw) => {
-    if (!raw) return;
-    const e = withIdentity(raw);
-    const cur = map.get(e.uid);
-    if (!cur) { map.set(e.uid, e); return; }
-    const a = cur.ts || "";
-    const b = e.ts || "";
-    if (b > a) map.set(e.uid, e);
-    else if (b === a && e.deletedAt && !cur.deletedAt) map.set(e.uid, e);
-  };
-  local.forEach(put);
-  remote.forEach(put);
-  return sortEntries(Array.from(map.values()));
-}
-
 // Tombstones older than a week are dropped so the payload does not grow forever.
 const TOMBSTONE_TTL = 7 * 24 * 60 * 60 * 1000;
 function pruneTombstones(entries) {
@@ -310,17 +290,59 @@ async function pushLog(deployId, entry, action) {
   }
 }
 
-// A failed download is reported as a failure. Previously it returned null, which
-// the caller turned into an empty list, so every real entry looked like it was
-// missing from the sheet and one tap could wipe the day.
-async function pullState(deployId) {
-  const url = buildUrl(deployId);
-  if (!url) return { ok: false, error: "no sheet connected" };
+// ─── WORKER SYNC ───
+// Each entry is its own row on the server, so a push says "here are the three
+// entries I changed" instead of "here is everything I know". Two phones adding
+// customers at the same time no longer overwrite one another.
+function makeStallKey() {
+  const raw = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
+  return raw.replace(/-/g, "").slice(0, 20);
+}
+
+function todayMarket(d = new Date()) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function cursorKey(stall, market) { return "ngd_cursor:" + stall + ":" + market; }
+
+// The server owns the display number, so whichever side wins on content, the
+// number comes from the server. That is what stops two phones showing #12 twice.
+function mergeFromServer(local, remote) {
+  const byUid = new Map(local.map(e => [e.uid, e]));
+  remote.forEach(r => {
+    const l = byUid.get(r.uid);
+    if (!l) { byUid.set(r.uid, r); return; }
+    const winner = (r.ts || "") >= (l.ts || "") ? r : l;
+    byUid.set(r.uid, { ...winner, id: r.id ?? winner.id });
+  });
+  return sortEntries(Array.from(byUid.values()));
+}
+
+// One round trip does both directions: it sends what changed here and returns
+// what changed anywhere else since the cursor.
+async function syncWithWorker({ url, stall, market, since, rows }) {
+  const base = String(url).replace(/\/+$/, "");
+  const endpoint = base + "/sync?stall=" + encodeURIComponent(stall) +
+    "&market=" + encodeURIComponent(market) + "&since=" + since;
   try {
-    const res = await fetch(url + "?action=getState&t=" + Date.now());
-    if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
+    const res = rows.length
+      ? await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows }),
+        })
+      : await fetch(endpoint);
+    if (!res.ok) {
+      let message = "sync returned " + res.status;
+      try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep the status */ }
+      return { ok: false, error: message };
+    }
     const data = await res.json();
-    return { ok: true, entries: Array.isArray(data?.entries) ? data.entries : [] };
+    return {
+      ok: true,
+      cursor: Number(data.cursor) || 0,
+      rows: Array.isArray(data.rows) ? data.rows : [],
+    };
   } catch (e) {
     return { ok: false, error: e.message || "no connection" };
   }
@@ -357,8 +379,37 @@ function loadSavedEntries() {
   return sortEntries(loaded);
 }
 
-function loadDeployId() {
-  try { return localStorage.getItem("ngd_deploy_id") || ""; } catch { return ""; }
+function loadStr(key) {
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+
+function saveStr(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* storage unavailable, carry on */ }
+}
+
+function loadDeployId() { return loadStr("ngd_deploy_id"); }
+
+// Generated once per stall, then shared with the other phones. It is both the
+// namespace on the server and the only thing keeping the data private, which is
+// why it is long and random rather than something memorable.
+function loadStallKey() {
+  const existing = loadStr("ngd_stall_key");
+  if (existing) return existing;
+  const fresh = makeStallKey();
+  saveStr("ngd_stall_key", fresh);
+  return fresh;
+}
+
+function loadMarket() {
+  return loadStr("ngd_market") || todayMarket();
+}
+
+// Entries changed here but not yet accepted by the server.
+function loadDirty() {
+  try {
+    const raw = localStorage.getItem("ngd_dirty");
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch { return new Set(); }
 }
 
 const GearIcon = () => (
@@ -371,7 +422,6 @@ export default function App() {
   const [tab, setTab] = useState("count");
   const [entries, setEntries] = useState(loadSavedEntries);
   const [expandedUid, setExpandedUid] = useState(null);
-  const [deployId, setDeployId] = useState(loadDeployId);
   const [showSettings, setShowSettings] = useState(false);
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("All");
@@ -380,66 +430,109 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState("");
   const [syncError, setSyncError] = useState("");
 
+  // Worker sync
+  const [syncUrl, setSyncUrl] = useState(() => loadStr("ngd_sync_url"));
+  const [stallKey, setStallKey] = useState(loadStallKey);
+  const [market, setMarket] = useState(loadMarket);
+  const [dirty, setDirty] = useState(loadDirty);
+
+  // The Google Sheet is now an export, not the database
+  const [deployId, setDeployId] = useState(loadDeployId);
+
   const [deviceId] = useState(getDeviceId);
   const entriesRef = useRef(entries);
-  const deployRef = useRef(deployId);
+  const dirtyRef = useRef(dirty);
+  const cfgRef = useRef({ syncUrl, stallKey, market });
   const syncing = useRef(false);
   useEffect(() => { entriesRef.current = entries; }, [entries]);
-  useEffect(() => { deployRef.current = deployId; }, [deployId]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+  useEffect(() => { cfgRef.current = { syncUrl, stallKey, market }; }, [syncUrl, stallKey, market]);
 
   // ── save ──
   useEffect(() => {
     try { localStorage.setItem("ngd_entries", JSON.stringify(entries)); } catch { /* storage unavailable, carry on */ }
   }, [entries]);
+  useEffect(() => { saveStr("ngd_sync_url", syncUrl); }, [syncUrl]);
+  useEffect(() => { saveStr("ngd_stall_key", stallKey); }, [stallKey]);
+  useEffect(() => { saveStr("ngd_market", market); }, [market]);
+  useEffect(() => { saveStr("ngd_deploy_id", deployId); }, [deployId]);
   useEffect(() => {
-    try { localStorage.setItem("ngd_deploy_id", deployId); } catch { /* storage unavailable, carry on */ }
-  }, [deployId]);
+    try { localStorage.setItem("ngd_dirty", JSON.stringify([...dirty])); } catch { /* storage unavailable, carry on */ }
+  }, [dirty]);
 
-  // ── the only sync path: pull, merge, push ──
+  const markDirty = useCallback((uid) => {
+    setDirty(prev => (prev.has(uid) ? prev : new Set(prev).add(uid)));
+  }, []);
+
+  // ── sync ──
+  // Sends only what changed here, receives only what changed elsewhere. Anything
+  // that fails to send stays in the queue and goes out on the next attempt, so a
+  // dead spot at the stall costs nothing.
   const runSync = useCallback(async (manual) => {
-    const id = deployRef.current;
-    if (!id || syncing.current) return;
+    const { syncUrl: url, stallKey: stall, market: day } = cfgRef.current;
+    if (!url || !stall || !day || syncing.current) return;
     syncing.current = true;
     if (manual) setSyncStatus("syncing…");
 
-    const pulled = await pullState(id);
-    if (!pulled.ok) {
-      syncing.current = false;
-      setSyncError(pulled.error);
-      setSyncStatus("offline");
+    const queued = dirtyRef.current;
+    const outgoing = entriesRef.current.filter(e => queued.has(e.uid));
+    const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
+
+    let since = 0;
+    try { since = parseInt(localStorage.getItem(cursorKey(stall, day)) || "0", 10) || 0; } catch { /* storage unavailable, carry on */ }
+
+    const result = await syncWithWorker({ url, stall, market: day, since, rows: outgoing });
+    syncing.current = false;
+
+    if (!result.ok) {
+      setSyncError(result.error);
+      setSyncStatus("");
       return;
     }
 
-    const merged = pruneTombstones(mergeEntries(entriesRef.current, pulled.entries));
-    setEntries(merged);
+    try { localStorage.setItem(cursorKey(stall, day), String(result.cursor)); } catch { /* storage unavailable, carry on */ }
+    if (result.rows.length) setEntries(prev => pruneTombstones(mergeFromServer(prev, result.rows)));
 
-    const pushed = await pushState(id, merged);
-    syncing.current = false;
-    if (pushed.ok) {
-      setSyncError("");
-      const label = pushed.confirmed ? "synced" : "sent";
-      setSyncStatus(label);
-      setTimeout(() => setSyncStatus(s => (s === label ? "" : s)), 2000);
-    } else {
-      setSyncError(pushed.error);
-      setSyncStatus("offline");
-    }
+    // Only clear what was actually sent, and only if it has not been edited again
+    // while the request was in flight.
+    setDirty(prev => {
+      const next = new Set(prev);
+      sentAt.forEach((ts, uid) => {
+        const now = entriesRef.current.find(e => e.uid === uid);
+        if (!now || now.ts === ts) next.delete(uid);
+      });
+      return next;
+    });
+
+    setSyncError("");
+    setSyncStatus("synced");
+    setTimeout(() => setSyncStatus(s => (s === "synced" ? "" : s)), 1500);
   }, []);
 
-  // ── automatic, so two phones never drift far enough to need a conflict list ──
   useEffect(() => {
-    if (!deployId) return;
+    if (!syncUrl || !stallKey || !market) return;
     const first = setTimeout(() => runSync(false), 300);
     const t = setInterval(() => runSync(false), SYNC_INTERVAL);
     return () => { clearTimeout(first); clearInterval(t); };
-  }, [deployId, runSync]);
+  }, [syncUrl, stallKey, market, runSync]);
+
+  // Sync as soon as the phone comes back, rather than waiting out the timer.
+  useEffect(() => {
+    const wake = () => { if (document.visibilityState === "visible") runSync(false); };
+    window.addEventListener("online", wake);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      window.removeEventListener("online", wake);
+      document.removeEventListener("visibilitychange", wake);
+    };
+  }, [runSync]);
 
   const logAction = useCallback((entry, action) => {
-    if (entry && deployRef.current) pushLog(deployRef.current, entry, action);
-  }, []);
+    if (entry && deployId) pushLog(deployId, entry, action);
+  }, [deployId]);
 
-  // Display numbers only ever go up on this device, so a deleted entry never
-  // hands its number to the next customer.
+  // A provisional number so the entry reads correctly before it has synced. The
+  // server replaces it with one that is unique across every phone.
   const claimNumber = useCallback((current) => {
     let stored = 0;
     try { stored = parseInt(localStorage.getItem("ngd_seq") || "0", 10) || 0; } catch { /* storage unavailable, carry on */ }
@@ -462,22 +555,21 @@ export default function App() {
     };
     setEntries(prev => sortEntries([entry, ...prev]));
     setExpandedUid(entry.uid);
+    markDirty(entry.uid);
     logAction(entry, "add");
-  }, [entries, deviceId, claimNumber, logAction]);
+  }, [entries, deviceId, claimNumber, markDirty, logAction]);
 
   const deleteEntry = useCallback((uid) => {
-    let removed = null;
-    setEntries(prev => prev.map(e => {
-      if (e.uid !== uid) return e;
-      removed = { ...e, deletedAt: new Date().toISOString(), ts: new Date().toISOString() };
-      return removed;
-    }));
+    const stamp = new Date().toISOString();
+    setEntries(prev => prev.map(e => (e.uid === uid ? { ...e, deletedAt: stamp, ts: stamp } : e)));
     setExpandedUid(null);
-    setTimeout(() => logAction(removed, "delete"), 0);
-  }, [logAction]);
+    markDirty(uid);
+    const entry = entriesRef.current.find(e => e.uid === uid);
+    if (entry) logAction({ ...entry, deletedAt: stamp }, "delete");
+  }, [markDirty, logAction]);
 
-  // Undo removes the newest entry this phone created, never whatever happens to
-  // be sitting at the top of a merged list.
+  // Removes the newest entry this phone created, never whatever happens to be at
+  // the top of a merged list.
   const undoEntry = useCallback(() => {
     const mine = entries.filter(e => !e.deletedAt && e.deviceId === deviceId);
     if (mine.length === 0) return;
@@ -491,13 +583,15 @@ export default function App() {
       if (field === "amount") patch.amountManual = true;
       return { ...e, ...patch };
     }));
-  }, []);
+    markDirty(uid);
+  }, [markDirty]);
 
   const saveAndCollapse = useCallback((uid) => {
     setExpandedUid(null);
     const entry = entriesRef.current.find(e => e.uid === uid);
     if (entry) logAction(entry, "update");
-  }, [logAction]);
+    runSync(false);
+  }, [logAction, runSync]);
 
   const toggleSoldItem = useCallback((uid, catalogId) => {
     setEntries(prev => prev.map(e => {
@@ -512,7 +606,8 @@ export default function App() {
         ts: new Date().toISOString(),
       };
     }));
-  }, []);
+    markDirty(uid);
+  }, [markDirty]);
 
   // ── derived ──
   const visible = entries.filter(e => !e.deletedAt);
@@ -531,23 +626,42 @@ export default function App() {
     return s + (isNaN(a) ? 0 : a);
   }, 0);
 
-  const unsent = syncError && deployId;
+  const unsentCount = dirty.size;
+  const syncConfigured = Boolean(syncUrl && stallKey && market);
+
+  const exportToSheet = async () => {
+    if (!deployId) return;
+    setSyncStatus("exporting…");
+    const result = await pushState(deployId, visible);
+    setSyncStatus(result.ok ? (result.confirmed ? "exported" : "sent") : "export failed");
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
 
   const exportData = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(visible, null, 2));
       setSyncStatus("copied");
-      setTimeout(() => setSyncStatus(s => (s === "copied" ? "" : s)), 2000);
     } catch {
       setSyncStatus("copy failed");
-      setTimeout(() => setSyncStatus(s => (s === "copy failed" ? "" : s)), 2500);
     }
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
+  const startNewMarket = () => {
+    const today = todayMarket();
+    if (today === market) return;
+    if (!confirm("Start a new market day (" + today + ")? Today's list clears on this phone. " + market + " stays on the server.")) return;
+    setMarket(today);
+    setEntries([]);
+    setDirty(new Set());
+    setExpandedUid(null);
   };
 
   const clearData = () => {
-    if (confirm("Clear this phone's copy? The sheet keeps everything, and the next sync pulls it back.")) {
+    if (confirm("Clear this phone's copy? The server keeps everything, and the next sync pulls it back.")) {
       setEntries([]);
       setExpandedUid(null);
+      try { localStorage.removeItem(cursorKey(stallKey, market)); } catch { /* storage unavailable, carry on */ }
     }
   };
 
@@ -617,12 +731,33 @@ export default function App() {
               <button style={S.closeBtn} onClick={() => setShowSettings(false)}>✕</button>
             </div>
             <div style={S.rule} />
-            <label style={S.label}>Google Sheets Deployment ID</label>
-            <input style={S.modalInput} value={deployId} onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
-            <p style={S.hint}>Apps Script → Deploy → Web app → copy the ID from the URL</p>
-            {deployId && (
+            <label style={S.label}>Sync address</label>
+            <input style={S.modalInput} value={syncUrl} inputMode="url"
+              onChange={e => setSyncUrl(e.target.value.trim())}
+              placeholder="https://nogooddesign-sync.workers.dev" />
+            <p style={S.hint}>Paste the same address into every phone</p>
+
+            <label style={S.label}>Stall key</label>
+            <input style={S.modalInput} value={stallKey}
+              onChange={e => setStallKey(e.target.value.trim())} placeholder="20 characters" />
+            <p style={S.hint}>
+              Your phones share this. It keeps the stall private, so treat it like a password.
+            </p>
+
+            <label style={S.label}>Market day</label>
+            <input style={S.modalInput} value={market}
+              onChange={e => setMarket(e.target.value.trim())} placeholder="2026-08-28" />
+            {market !== todayMarket() && (
+              <button style={S.modalBtn} onClick={startNewMarket}>Start today ({todayMarket()})</button>
+            )}
+
+            {syncConfigured && (
               <p style={S.connectedText}>
-                {syncError ? "Cannot reach the sheet: " + syncError : "Connected · syncing every 20s"}
+                {syncError
+                  ? "Cannot reach sync: " + syncError
+                  : unsentCount > 0
+                    ? unsentCount + " waiting to send"
+                    : "Connected \u00b7 syncing every 20s"}
               </p>
             )}
             <p style={S.hint}>This phone is {deviceId}</p>
@@ -630,6 +765,17 @@ export default function App() {
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={() => { runSync(true); setShowSettings(false); }}>Sync now</button>
             </div>
+
+            <div style={S.rule} />
+            <label style={S.label}>Google Sheet export (optional)</label>
+            <input style={S.modalInput} value={deployId}
+              onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
+            <p style={S.hint}>Apps Script deployment ID. The sheet is a backup now, not the source.</p>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={exportToSheet} disabled={!deployId}>Send today to sheet</button>
+            </div>
+
+            <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={exportData}>Export JSON</button>
               <button style={S.modalBtn} onClick={clearData}>Clear local</button>
@@ -642,8 +788,11 @@ export default function App() {
       <div style={S.header}>
         <span style={S.logo}>NO GOOD DESIGN CO.</span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {unsent && !syncStatus && <span style={S.syncBadge}>offline</span>}
-          {syncStatus && <span style={S.syncBadge}>{syncStatus}</span>}
+          {syncStatus
+            ? <span style={S.syncBadge}>{syncStatus}</span>
+            : syncConfigured && syncError
+              ? <span style={S.syncBadge}>{unsentCount > 0 ? "offline \u00b7 " + unsentCount : "offline"}</span>
+              : null}
           {boughtCount > 0 && <span style={S.headerStat}>{boughtCount} sold · ${totalRevenue}</span>}
           <button style={S.gearBtn} onClick={() => setShowSettings(true)}><GearIcon /></button>
         </div>

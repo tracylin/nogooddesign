@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nogooddesign-sync",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nogooddesign",
+      "database_id": "PLACEHOLDER_SET_BY_DEPLOY",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
