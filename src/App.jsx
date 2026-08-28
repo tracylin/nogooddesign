@@ -154,6 +154,29 @@ const CATALOG = [
   { id: "br6", name: "Bracelet (6)", category: "Bracelets", price: 25 },
 ];
 
+// A sale keeps its own record of what went in it. The catalog says what is in
+// stock now, and that changes: an inventory update drops what sold out and was
+// not restocked, and can reprice what remains. Reading history back through the
+// current catalog made sold items disappear from past sales and made old sales
+// silently adopt new prices.
+function soldLines(entry) {
+  const ids = entry.soldCatalogIds || [];
+  const snapshot = Array.isArray(entry.soldItems) ? entry.soldItems : [];
+  const byId = new Map(snapshot.map(i => [i.id, i]));
+  return ids.map(id => {
+    const kept = byId.get(id);
+    if (kept) return kept;
+    const current = CATALOG.find(c => c.id === id);
+    // Nothing recorded and nothing in the catalog: show the code rather than
+    // pretending the item was never there.
+    return current ? { id, name: current.name, price: current.price } : { id, name: id, price: null };
+  });
+}
+
+function soldNamesOf(entry) {
+  return soldLines(entry).map(i => i.name).join(", ");
+}
+
 const CATEGORIES = ["All", "Hats", "Bags", "Charms", "Belts", "Rings", "Bracelets"];
 const ENGAGEMENTS = ["Stopped", "Touched", "Asked", "Bought"];
 
@@ -228,9 +251,7 @@ function pruneTombstones(entries) {
 function enrich(entries) {
   return entries.map(e => ({
     ...e,
-    soldItemNames: (e.soldCatalogIds || [])
-      .map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; })
-      .join(", "),
+    soldItemNames: soldNamesOf(e),
   }));
 }
 
@@ -293,9 +314,7 @@ async function pushLog(deployId, entry, action) {
           engage: entry.engage || "",
           amount: entry.amount || "",
           items: entry.items || "",
-          soldItemNames: (entry.soldCatalogIds || [])
-            .map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; })
-            .join(", "),
+          soldItemNames: soldNamesOf(entry),
           payment: entry.payment || "",
           note: entry.note || "",
           raw: JSON.stringify(entry),
@@ -342,7 +361,7 @@ const EXPORT_COLUMNS = [
   ["engagement", e => e.engage],
   ["amount", e => e.amount],
   ["payment", e => e.payment],
-  ["items sold", e => (e.soldCatalogIds || []).map(id => CATALOG.find(c => c.id === id)?.name || id).join(", ")],
+  ["items sold", e => soldNamesOf(e)],
   ["items typed", e => e.items],
   ["note", e => e.note],
   ["phone", e => e.deviceId],
@@ -408,7 +427,7 @@ function downloadFile(name, text, type) {
 // other person's work disappears. So every change records its own field.
 const MERGEABLE = [
   "time", "engage", "amount", "amountManual", "payment",
-  "items", "soldCatalogIds", "soldItemNames", "note",
+  "items", "soldCatalogIds", "soldItems", "soldItemNames", "note",
 ];
 
 function stampFor(stamps, field, fallback) {
@@ -673,8 +692,7 @@ export default function App() {
       // ids. Without them an exported backup is a list of codes.
       const outgoing = entriesRef.current.filter(e => queued.has(e.uid)).map(e => ({
         ...e,
-        soldItemNames: (e.soldCatalogIds || [])
-          .map(id => CATALOG.find(c => c.id === id)?.name || id).join(", "),
+        soldItemNames: soldNamesOf(e),
       }));
       const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
 
@@ -833,12 +851,20 @@ export default function App() {
       const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
       const sum = next.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
       const now = new Date().toISOString();
-      const touched = e.amountManual
-        ? ["soldCatalogIds", "soldItemNames"]
-        : ["soldCatalogIds", "soldItemNames", "amount"];
+      const base = ["soldCatalogIds", "soldItems", "soldItemNames"];
+      const touched = e.amountManual ? base : [...base, "amount"];
+      // Recorded at the price it sold for, so a later repricing does not rewrite
+      // what already happened.
+      const soldItems = next.map(cid => {
+        const kept = (e.soldItems || []).find(i => i.id === cid);
+        if (kept) return kept;
+        const c = CATALOG.find(x => x.id === cid);
+        return c ? { id: c.id, name: c.name, price: c.price } : { id: cid, name: cid, price: null };
+      });
       return {
         ...e,
         soldCatalogIds: next,
+        soldItems,
         amount: e.amountManual ? e.amount : String(sum),
         ts: now,
         fieldTs: touch(e, touched, now),
@@ -1278,7 +1304,7 @@ function CollapsedEntry({ entry, onTap }) {
   const isBought = entry.engage === "Bought";
   const hasSale = isBought && entry.amount;
   const dots = !entry.engage;
-  const soldNames = (entry.soldCatalogIds || []).map(id => CATALOG.find(c => c.id === id)?.name).filter(Boolean);
+  const soldNames = soldLines(entry).map(i => i.name);
   return (
     <div style={S.entryRow} onClick={onTap}>
       <div style={S.entryLeft}>
@@ -1302,7 +1328,7 @@ function CollapsedEntry({ entry, onTap }) {
 
 function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
   const isBought = entry.engage === "Bought";
-  const soldItems = (entry.soldCatalogIds || []).map(id => CATALOG.find(c => c.id === id)).filter(Boolean);
+  const soldItems = soldLines(entry);
   return (
     <div style={S.entryExpanded}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14 }}>

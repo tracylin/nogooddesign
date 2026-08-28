@@ -84,7 +84,7 @@ function normalise(raw, nowMs) {
 // is merged on its own.
 const MERGEABLE = [
   "time", "engage", "amount", "amountManual", "payment",
-  "items", "soldCatalogIds", "soldItemNames", "note",
+  "items", "soldCatalogIds", "soldItems", "soldItemNames", "note",
 ];
 
 function stampFor(stamps, field, fallback) {
@@ -260,7 +260,8 @@ const EXPORT_COLUMNS = [
   ["engagement", e => e.engage],
   ["amount", e => e.amount],
   ["payment", e => e.payment],
-  ["items sold", e => e.soldItemNames || (e.soldCatalogIds || []).join(" ")],
+  ["items sold", e => e.soldItemNames ||
+    (Array.isArray(e.soldItems) ? e.soldItems.map(i => i.name).join(", ") : (e.soldCatalogIds || []).join(" "))],
   ["items typed", e => e.items],
   ["note", e => e.note],
   ["phone", e => e.deviceId],
