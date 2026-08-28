@@ -66,9 +66,14 @@ const openSettings = p => p.page.evaluate(() => {
   const gear = [...document.querySelectorAll("button")].find(b => b.querySelector("svg"));
   gear?.click();
 });
+// Clicked directly rather than through a locator: the modal overlays the page,
+// so hit testing keeps landing on whatever is underneath.
 const closeSettings = async p => {
-  await p.page.getByRole("button", { name: "✕" }).first().click().catch(() => {});
-  await p.page.waitForTimeout(200);
+  await p.page.evaluate(() => {
+    const close = [...document.querySelectorAll("button")].find(b => b.textContent.trim() === "\u2715");
+    close?.click();
+  });
+  await p.page.waitForTimeout(250);
 };
 
 console.log("\n1. A phone left on yesterday is told, not left counting into it");
