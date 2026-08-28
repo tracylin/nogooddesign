@@ -31,8 +31,8 @@ async function pull(market, since) {
 
 // Minutes ago, not a fixed wall clock time. A fixed future time would be
 // clamped by the server's skew guard and the ordering under test would be lost.
-const BASE = Date.now() - 60 * 60 * 1000;
-const at = n => new Date(BASE + n * 60 * 1000).toISOString();
+const T0 = Date.now() - 60 * 60 * 1000;
+const at = n => new Date(T0 + n * 60 * 1000).toISOString();
 const entry = (uid, device, over = {}) => ({
   uid, deviceId: device, engage: "Stopped", amount: "", items: "", soldCatalogIds: [],
   payment: "", note: uid, createdAt: at(1), ts: at(1), deletedAt: null, ...over,
