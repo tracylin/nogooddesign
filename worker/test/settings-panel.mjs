@@ -70,6 +70,36 @@ for (const [label, viewport] of [["iPhone SE", { width: 375, height: 667 }],
   const closeVisible = await page.getByRole("button", { name: "✕" }).first().isVisible().catch(() => false);
   check("the close button stays pinned at the bottom of the list", closeVisible);
 
+  // Nothing may extend past the panel's own edges, at any width. Reported from
+  // a phone as the panel wobbling sideways while being scrolled.
+  const sideways = await page.evaluate(() => {
+    const body = [...document.querySelectorAll("div")]
+      .find(d => getComputedStyle(d).overflowY === "auto" && d.scrollHeight > d.clientHeight + 20);
+    if (!body) return null;
+    const br = body.getBoundingClientRect();
+    const spilling = [];
+    body.querySelectorAll("*").forEach(el => {
+      const r = el.getBoundingClientRect();
+      if (r.right > br.right + 0.5 || r.left < br.left - 0.5) {
+        spilling.push(el.tagName + " " + (el.textContent || "").trim().slice(0, 20));
+      }
+    });
+    const style = getComputedStyle(body);
+    return {
+      panelOverflowX: body.scrollWidth - body.clientWidth,
+      pageOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      touchAction: style.touchAction,
+      overflowX: style.overflowX,
+      pageHeld: getComputedStyle(document.body).overflow === "hidden",
+      spilling: spilling.slice(0, 5),
+    };
+  });
+  check("nothing spills out sideways", sideways?.spilling.length === 0, sideways?.spilling);
+  check("the panel cannot scroll sideways", sideways?.panelOverflowX === 0, sideways?.panelOverflowX);
+  check("nor can the page behind it", sideways?.pageOverflowX === 0, sideways?.pageOverflowX);
+  check("gestures are limited to vertical", sideways?.touchAction === "pan-y", sideways?.touchAction);
+  check("the page behind is held still", sideways?.pageHeld === true, sideways?.pageHeld);
+
   await page.getByRole("button", { name: "✕" }).first().click();
   await page.waitForTimeout(250);
   const closed = !(await page.getByText("Sync address", { exact: false }).first().isVisible().catch(() => false));
