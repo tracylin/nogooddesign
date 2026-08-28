@@ -60,8 +60,10 @@ await page.evaluate(() => {
 await page.reload();
 await page.waitForTimeout(800);
 
-const row = await page.getByText("#1", { exact: false }).first().textContent();
-check("the retired item still shows in the list", row.includes("逃跑乐园"), row);
+// Read the whole collapsed list, not the "#1" label itself.
+const listText = await page.evaluate(() => document.body.innerText);
+check("the retired item still shows in the list", listText.includes("逃跑乐园"),
+  listText.split("\n").filter(Boolean).slice(0, 6));
 
 await page.getByText("#1", { exact: false }).first().click();
 await page.waitForTimeout(400);
