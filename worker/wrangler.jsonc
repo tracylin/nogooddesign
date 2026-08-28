@@ -8,7 +8,7 @@
     {
       "binding": "DB",
       "database_name": "nogooddesign",
-      "database_id": "PLACEHOLDER_SET_BY_DEPLOY",
+      "database_id": "88622c4d-cea0-43b7-b285-a759063b892f",
       "migrations_dir": "migrations"
     }
   ]
