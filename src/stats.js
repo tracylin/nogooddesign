@@ -110,13 +110,26 @@ export function computeStats(entries, catalog = []) {
   const bestHour = hours.filter(h => h.sales > 0)
     .sort((a, b) => b.sales - a.sales || b.revenue - a.revenue)[0] || null;
 
+  // What a sale actually took is the amount, and a two hat bundle at five off
+  // took less than the two list prices. Each item is credited its share of what
+  // came in rather than what it was marked at, so this list adds up to the day's
+  // takings instead of overstating every discount.
   const items = new Map();
-  sold.forEach(e => saleLines(e, catalog).forEach(l => {
-    if (!items.has(l.id)) items.set(l.id, { id: l.id, name: l.name, count: 0, revenue: 0 });
-    const it = items.get(l.id);
-    it.count += 1;
-    it.revenue += typeof l.price === "number" ? l.price : 0;
-  }));
+  sold.forEach(e => {
+    const lines = saleLines(e, catalog);
+    if (!lines.length) return;
+    const priceOf = l => (typeof l.price === "number" && isFinite(l.price) ? l.price : 0);
+    const amount = num(e.amount);
+    const listed = lines.reduce((t, l) => t + priceOf(l), 0);
+    lines.forEach(l => {
+      if (!items.has(l.id)) items.set(l.id, { id: l.id, name: l.name, count: 0, revenue: 0 });
+      const it = items.get(l.id);
+      it.count += 1;
+      if (amount === null) it.revenue += priceOf(l);
+      else if (listed > 0) it.revenue += amount * (priceOf(l) / listed);
+      else it.revenue += amount / lines.length;
+    });
+  });
   const topItems = [...items.values()]
     .sort((a, b) => b.count - a.count || b.revenue - a.revenue)
     .map(i => ({ ...i, revenue: round2(i.revenue) }));

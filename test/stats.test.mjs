@@ -119,6 +119,14 @@ const s8 = computeStats([
   sale(20, { soldCatalogIds: ["b"], payment: "Cash" }),
 ], cat8);
 check("the repeat seller comes first", s8.topItems[0].name === "Hat" && s8.topItems[0].count === 2, s8.topItems);
+const disc = computeStats([sale(28, { soldCatalogIds: ["a", "b"] })], [{ id: "a", name: "A", price: 20 }, { id: "b", name: "B", price: 20 }]);
+check("a discounted sale credits each item its share, not its list price",
+  disc.topItems.every(i => i.revenue === 14), disc.topItems);
+check("so the item list adds up to the takings",
+  disc.topItems.reduce((t, i) => t + i.revenue, 0) === disc.revenue, [disc.topItems, disc.revenue]);
+const uneven = computeStats([sale(30, { soldCatalogIds: ["a", "b"] })], [{ id: "a", name: "A", price: 40 }, { id: "b", name: "B", price: 20 }]);
+check("an uneven bundle splits in proportion to what things are marked at",
+  uneven.topItems[0].revenue === 20 && uneven.topItems[1].revenue === 10, uneven.topItems);
 check("a blank payment is named rather than hidden",
   s8.payments.some(p => p.label === "not recorded" && p.count === 1), s8.payments);
 check("payment totals add up", s8.payments.reduce((t, p) => t + p.amount, 0) === 100, s8.payments);
