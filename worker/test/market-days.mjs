@@ -66,6 +66,10 @@ const openSettings = p => p.page.evaluate(() => {
   const gear = [...document.querySelectorAll("button")].find(b => b.querySelector("svg"));
   gear?.click();
 });
+const closeSettings = async p => {
+  await p.page.getByRole("button", { name: "✕" }).first().click().catch(() => {});
+  await p.page.waitForTimeout(200);
+};
 
 console.log("\n1. A phone left on yesterday is told, not left counting into it");
 const A = await phone("phoneA", YESTERDAY);
@@ -101,7 +105,8 @@ console.log("\n4. One phone opening a later day pulls the other along");
 // on the phone itself would ever hint that the market has moved.
 await openSettings(A);
 await A.page.fill('input[type="date"]', TOMORROW);
-await A.page.waitForTimeout(1500);
+await A.page.waitForTimeout(1200);
+await closeSettings(A);
 check("the first phone moved", (await state(A)).market === TOMORROW, (await state(A)).market);
 await A.page.getByRole("button", { name: "✲" }).click();
 await A.page.getByRole("button", { name: "done" }).click();
@@ -120,6 +125,7 @@ console.log("\n4b. Going back to an earlier day still shows it");
 // A stale cursor would make a revisited day come back empty.
 await openSettings(B);
 await B.page.fill('input[type="date"]', TODAY);
+await closeSettings(B);
 caught = await waitFor(B, st => st.market === TODAY && st.live.length === 1, 12000);
 check("today's customer is still there on return", caught !== null,
   caught === null ? await state(B) : caught + "ms");
@@ -147,6 +153,8 @@ writeFileSync(path, JSON.stringify(backup));
 
 await openSettings(A);
 await A.page.setInputFiles('input[type="file"]', path);
+await A.page.waitForTimeout(500);
+await closeSettings(A);
 const restored = await waitFor(A, st => st.market === LONG_AGO && st.live.length === 2, 12000);
 check("the file is read and the phone moves to that day", restored !== null,
   restored === null ? await state(A) : restored + "ms");
@@ -164,6 +172,7 @@ console.log("\n6. Restoring the same file twice cannot duplicate anything");
 await openSettings(A);
 await A.page.setInputFiles('input[type="file"]', path);
 await A.page.waitForTimeout(2500);
+await closeSettings(A);
 const after = await state(A);
 check("still two customers, not four", after.live.length === 2, after.live.length);
 const serverAfter = (await (await fetch(`${WORKER}/sync?stall=${STALL}&market=${LONG_AGO}&since=0`)).json()).rows;
