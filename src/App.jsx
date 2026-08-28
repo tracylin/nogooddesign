@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { saleLines, saleNames, snapshotOf } from "./sale.js";
+import { computeStats } from "./stats.js";
 
 // ─── PRODUCT IMAGES (96×96 base64 from spreadsheet) ───
 const IMAGES = {
@@ -160,21 +162,11 @@ const CATALOG = [
 // current catalog made sold items disappear from past sales and made old sales
 // silently adopt new prices.
 function soldLines(entry) {
-  const ids = entry.soldCatalogIds || [];
-  const snapshot = Array.isArray(entry.soldItems) ? entry.soldItems : [];
-  const byId = new Map(snapshot.map(i => [i.id, i]));
-  return ids.map(id => {
-    const kept = byId.get(id);
-    if (kept) return kept;
-    const current = CATALOG.find(c => c.id === id);
-    // Nothing recorded and nothing in the catalog: show the code rather than
-    // pretending the item was never there.
-    return current ? { id, name: current.name, price: current.price } : { id, name: id, price: null };
-  });
+  return saleLines(entry, CATALOG);
 }
 
 function soldNamesOf(entry) {
-  return soldLines(entry).map(i => i.name).join(", ");
+  return saleNames(entry, CATALOG);
 }
 
 const CATEGORIES = ["All", "Hats", "Bags", "Charms", "Belts", "Rings", "Bracelets"];
@@ -859,7 +851,7 @@ export default function App() {
         const kept = (e.soldItems || []).find(i => i.id === cid);
         if (kept) return kept;
         const c = CATALOG.find(x => x.id === cid);
-        return c ? { id: c.id, name: c.name, price: c.price } : { id: cid, name: cid, price: null };
+        return c ? snapshotOf(c) : { id: cid, name: cid, price: null };
       });
       return {
         ...e,
@@ -889,6 +881,9 @@ export default function App() {
     const a = parseFloat(e.amount);
     return s + (isNaN(a) ? 0 : a);
   }, 0);
+
+  // Scoped to the market day that is loaded, never a running total.
+  const stats = tab === "numbers" ? computeStats(visible, CATALOG) : null;
 
   const unsentCount = dirty.size;
   // Today wins if the calendar has moved on. Otherwise, if another phone has
@@ -1285,6 +1280,10 @@ export default function App() {
             ))}
           </div>
         </div>
+      ) : tab === "numbers" ? (
+        <div style={S.content}>
+          <Numbers stats={stats} market={market} />
+        </div>
       ) : (
         <div style={S.content}>
           <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} soldOutIds={soldOutIds} />
@@ -1295,6 +1294,7 @@ export default function App() {
       <div style={S.nav}>
         <button style={tab === "count" ? S.navActive : S.navBtn} onClick={() => setTab("count")}>Counter</button>
         <button style={tab === "price" ? S.navActive : S.navBtn} onClick={() => setTab("price")}>Price check</button>
+        <button style={tab === "numbers" ? S.navActive : S.navBtn} onClick={() => setTab("numbers")}>Numbers</button>
       </div>
     </div>
   );
@@ -1392,6 +1392,128 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
       )}
       <input style={S.noteInput} value={entry.note}
         onChange={e => onUpdate(entry.uid, "note", e.target.value)} placeholder="note (optional)" />
+    </div>
+  );
+}
+
+// Whole dollars stay whole. Anything with cents keeps both of them, so an
+// average never reads as $24.1.
+const money = n => {
+  const v = Math.round(n * 100) / 100;
+  return "$" + (Number.isInteger(v)
+    ? v.toLocaleString()
+    : v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+};
+const pct = n => Math.round(n * 100) + "%";
+
+function StatBlock({ label, value, sub }) {
+  return (
+    <div style={S.statBlock}>
+      <div style={S.statValue}>{value}</div>
+      <div style={S.statLabel}>{label}</div>
+      <div style={S.statSub}>{sub || "\u00a0"}</div>
+    </div>
+  );
+}
+
+// A glance view for the day that is loaded. Everything is computed on the phone
+// from entries already in hand, so it works with no signal and costs nothing.
+function Numbers({ stats, market }) {
+  if (!stats || stats.people === 0) {
+    return <div style={S.numbers}><div style={S.empty}>Nothing counted on {market} yet</div></div>;
+  }
+  const widest = stats.funnel[0].count || 1;
+  const busiest = stats.hours.reduce((m, h) => Math.max(m, h.people), 0) || 1;
+  const profitSub = stats.profit.known === 0
+    ? "no item costs yet"
+    : stats.profit.unknown > 0
+      ? "over " + stats.profit.known + " of " + stats.sales + " sales"
+      : stats.profit.margin !== null ? pct(stats.profit.margin) + " margin" : null;
+
+  return (
+    <div style={S.numbers}>
+      <div style={S.numbersDay}>{"market day " + market}</div>
+      <div style={S.statGrid}>
+        <StatBlock label="people" value={stats.people} sub={stats.unmarked > 0 ? stats.unmarked + " with no stage" : null} />
+        <StatBlock label="sold" value={stats.sales} sub={pct(stats.conversion) + " of everyone"} />
+        <StatBlock label="taken" value={money(stats.revenue)} sub={stats.averageSale !== null ? money(stats.averageSale) + " a sale" : null} />
+        <StatBlock label="profit" value={stats.profit.known ? money(stats.profit.amount) : "\u2014"} sub={profitSub} />
+      </div>
+
+      <div style={S.section}>
+        <div style={S.sectionTitle}>How far they got</div>
+        {stats.funnel.map(f => (
+          <div key={f.stage} style={S.funnelRow}>
+            <span style={S.funnelName}>{f.stage}</span>
+            <span style={S.funnelTrack}>
+              <span style={{ ...S.funnelBar, width: Math.round((f.count / widest) * 100) + "%" }} />
+            </span>
+            <span style={S.funnelCount}>{f.count}</span>
+          </div>
+        ))}
+        <div style={S.footnote}>Each bar counts everyone who got at least that far.</div>
+      </div>
+
+      {stats.hours.length > 0 && (
+        <>
+          <div style={S.rule} />
+          <div style={S.section}>
+            <div style={S.sectionTitle}>By the hour</div>
+            <div style={S.hourChart}>
+              {stats.hours.map(h => (
+                <div key={h.hour} style={S.hourCol}>
+                  <div style={S.hourBarBox}>
+                    <div style={{ ...S.hourBar, height: Math.round((h.people / busiest) * 100) + "%" }}>
+                      {h.sales > 0 && <div style={{ ...S.hourSold, height: Math.round((h.sales / h.people) * 100) + "%" }} />}
+                    </div>
+                  </div>
+                  <div style={S.hourTick}>{h.label}</div>
+                </div>
+              ))}
+            </div>
+            <div style={S.footnote}>
+              {stats.bestHour
+                ? "Solid marks sales. Best hour " + stats.bestHour.label + ", " + stats.bestHour.sales + " sold."
+                : "Solid marks sales. Nothing sold yet today."}
+            </div>
+          </div>
+        </>
+      )}
+
+      {stats.topItems.length > 0 && (
+        <>
+          <div style={S.rule} />
+          <div style={S.section}>
+            <div style={S.sectionTitle}>What sold</div>
+            {stats.topItems.slice(0, 8).map(i => (
+              <div key={i.id} style={S.listRow}>
+                <span style={S.listName}>{i.name}</span>
+                <span style={S.listVal}>{(i.count > 1 ? i.count + " \u00d7 " : "") + money(i.revenue)}</span>
+              </div>
+            ))}
+            {stats.salesWithoutItems > 0 && (
+              <div style={S.footnote}>
+                {stats.salesWithoutItems + " sale" + (stats.salesWithoutItems > 1 ? "s" : "") + " with no item picked, so it is not counted here"}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {stats.payments.length > 0 && (
+        <>
+          <div style={S.rule} />
+          <div style={S.section}>
+            <div style={S.sectionTitle}>Paid by</div>
+            {stats.payments.map(p => (
+              <div key={p.label} style={S.listRow}>
+                <span style={S.listName}>{p.label}</span>
+                <span style={S.listVal}>{p.count + " \u00b7 " + money(p.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1665,6 +1787,30 @@ const S = {
     fontFamily: SANS, fontSize: 13, color: BG, fontWeight: 500, cursor: "pointer", flexShrink: 0,
   },
   empty: { textAlign: "center", color: "#a09a92", padding: "40px 20px", fontSize: 13, fontFamily: SANS, fontStyle: "italic" },
+  numbers: { flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y" },
+  numbersDay: { fontFamily: SANS, fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", color: "#a09a92", padding: "12px 20px 10px" },
+  statGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, background: BK, borderTop: `1px solid ${BK}`, borderBottom: `1px solid ${BK}` },
+  statBlock: { background: BG, padding: "16px 20px 14px", minWidth: 0 },
+  statValue: { fontFamily: SERIF, fontSize: 38, lineHeight: 1, color: BK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  statLabel: { fontFamily: SANS, fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: BK, marginTop: 6 },
+  statSub: { fontFamily: SANS, fontSize: 10, color: "#a09a92", marginTop: 3, lineHeight: 1.3 },
+  section: { padding: "14px 20px 16px" },
+  sectionTitle: { fontFamily: SANS, fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: "#a09a92", marginBottom: 10 },
+  funnelRow: { display: "flex", alignItems: "center", gap: 10, marginBottom: 7 },
+  funnelName: { fontFamily: SANS, fontSize: 11, color: BK, width: 58, flexShrink: 0 },
+  funnelTrack: { flex: 1, height: 12, background: `${BK}18`, display: "block" },
+  funnelBar: { display: "block", height: "100%", background: BK },
+  funnelCount: { fontFamily: SANS, fontSize: 11, color: BK, width: 30, textAlign: "right", flexShrink: 0 },
+  footnote: { fontFamily: SANS, fontSize: 10, color: "#a09a92", marginTop: 8, lineHeight: 1.4 },
+  hourChart: { display: "flex", alignItems: "flex-end", gap: 4 },
+  hourCol: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", minWidth: 0 },
+  hourBarBox: { height: 66, width: "100%", display: "flex", alignItems: "flex-end" },
+  hourBar: { width: "100%", background: `${BK}22`, display: "flex", alignItems: "flex-end", minHeight: 1 },
+  hourSold: { width: "100%", background: BK },
+  hourTick: { fontFamily: SANS, fontSize: 9, color: "#a09a92", marginTop: 5, whiteSpace: "nowrap" },
+  listRow: { display: "flex", justifyContent: "space-between", gap: 12, padding: "6px 0", borderBottom: `1px solid ${BK}18` },
+  listName: { fontFamily: SANS, fontSize: 12, color: BK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  listVal: { fontFamily: SANS, fontSize: 12, color: BK, flexShrink: 0 },
   // DIFF REVIEW
   diffModal: { background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430, maxHeight: "85dvh", display: "flex", flexDirection: "column" },
   diffCount: { padding: "10px 20px", fontFamily: SANS, fontSize: 12, color: BK },
