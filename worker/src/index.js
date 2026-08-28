@@ -13,6 +13,12 @@
  *        body { rows: [entry, ...] }
  *        -> { cursor, rows }   upserts the rows, then returns what changed
  *
+ *   GET  /markets?stall=<key>
+ *        -> every market day held for this stall, with totals
+ *
+ *   GET  /export?stall=<key>&market=<day>&format=csv|json
+ *        -> that day as a file, for keeping somewhere safe
+ *
  * A push and a pull are one round trip. The cursor is a server side counter,
  * not a clock, so it does not care whether the phones agree about the time.
  */
@@ -169,6 +175,50 @@ async function applyRows(db, stall, market, incoming) {
   if (statements.length) await db.batch(statements);
 }
 
+function csvCell(value) {
+  const text = value == null ? "" : String(value);
+  return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+const EXPORT_COLUMNS = [
+  ["number", e => e.id],
+  ["time", e => e.time],
+  ["engagement", e => e.engage],
+  ["amount", e => e.amount],
+  ["payment", e => e.payment],
+  ["items sold", e => e.soldItemNames || (e.soldCatalogIds || []).join(" ")],
+  ["items typed", e => e.items],
+  ["note", e => e.note],
+  ["phone", e => e.deviceId],
+  ["created", e => e.createdAt],
+  ["last edited", e => e.ts],
+  ["deleted", e => e.deletedAt || ""],
+];
+
+async function marketsFor(db, stall) {
+  const { results } = await db
+    .prepare(
+      "SELECT market, " +
+      "  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS entries, " +
+      "  MAX(updated_at) AS last_activity " +
+      "FROM entries WHERE stall = ? GROUP BY market ORDER BY market DESC LIMIT 400")
+    .bind(stall)
+    .all();
+  return results || [];
+}
+
+async function rowsFor(db, stall, market, includeDeleted) {
+  const { results } = await db
+    .prepare(
+      "SELECT uid, seq, deleted_at, updated_at, body FROM entries " +
+      "WHERE stall = ? AND market = ? " +
+      (includeDeleted ? "" : "AND deleted_at IS NULL ") +
+      "ORDER BY seq ASC")
+    .bind(stall, market)
+    .all();
+  return (results || []).map(toEntry);
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -177,6 +227,61 @@ export default {
     if (url.pathname === "/" || url.pathname === "/health") {
       return json({ ok: true, service: "nogooddesign-sync" });
     }
+    const stallOnly = (url.searchParams.get("stall") || "").trim();
+
+    // A list of every market day this stall has, so past days can be found
+    // without having to remember their dates.
+    if (url.pathname === "/markets") {
+      if (stallOnly.length < MIN_STALL_KEY) return fail("stall key must be at least 12 characters", 400);
+      if (!env.DB) return fail("the D1 database is not bound to this Worker", 500);
+      try {
+        await ensureSchema(env.DB);
+        const markets = await marketsFor(env.DB, stallOnly);
+        return json({ ok: true, markets: markets.map(m => ({
+          market: m.market, entries: m.entries, lastActivity: m.last_activity,
+        })) });
+      } catch (e) {
+        return fail(e.message || "server error", 500);
+      }
+    }
+
+    // A day as a file, so there is a copy that does not depend on this service
+    // still existing.
+    if (url.pathname === "/export") {
+      const day = (url.searchParams.get("market") || "").trim();
+      const format = (url.searchParams.get("format") || "csv").toLowerCase();
+      if (stallOnly.length < MIN_STALL_KEY) return fail("stall key must be at least 12 characters", 400);
+      if (!day || day.length > 64) return fail("market is required", 400);
+      if (!env.DB) return fail("the D1 database is not bound to this Worker", 500);
+      try {
+        await ensureSchema(env.DB);
+        const includeDeleted = url.searchParams.get("deleted") === "1";
+        const rows = await rowsFor(env.DB, stallOnly, day, includeDeleted);
+        const stamp = "nogooddesign-" + day;
+        if (format === "json") {
+          return new Response(JSON.stringify({ market: day, exported: new Date().toISOString(), entries: rows }, null, 2), {
+            headers: {
+              "Content-Type": "application/json",
+              "Content-Disposition": 'attachment; filename="' + stamp + '.json"',
+              "Cache-Control": "no-store", ...CORS,
+            },
+          });
+        }
+        const lines = [EXPORT_COLUMNS.map(c => csvCell(c[0])).join(",")];
+        rows.forEach(e => lines.push(EXPORT_COLUMNS.map(c => csvCell(c[1](e))).join(",")));
+        // The byte order mark keeps Excel from mangling the Chinese item names.
+        return new Response("\ufeff" + lines.join("\r\n") + "\r\n", {
+          headers: {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": 'attachment; filename="' + stamp + '.csv"',
+            "Cache-Control": "no-store", ...CORS,
+          },
+        });
+      } catch (e) {
+        return fail(e.message || "server error", 500);
+      }
+    }
+
     if (url.pathname !== "/sync") return fail("not found", 404);
 
     const stall = (url.searchParams.get("stall") || "").trim();

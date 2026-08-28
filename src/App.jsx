@@ -325,6 +325,53 @@ function todayMarket(d = new Date()) {
 
 function cursorKey(stall, market) { return "ngd_cursor:" + stall + ":" + market; }
 
+function syncBase(url) { return String(url).replace(/\/+$/, ""); }
+
+function csvCell(value) {
+  const text = value == null ? "" : String(value);
+  return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+// Mirrors the columns the server writes, so a backup taken on the phone and one
+// downloaded from the server open the same way.
+const EXPORT_COLUMNS = [
+  ["number", e => e.id],
+  ["time", e => e.time],
+  ["engagement", e => e.engage],
+  ["amount", e => e.amount],
+  ["payment", e => e.payment],
+  ["items sold", e => (e.soldCatalogIds || []).map(id => CATALOG.find(c => c.id === id)?.name || id).join(", ")],
+  ["items typed", e => e.items],
+  ["note", e => e.note],
+  ["phone", e => e.deviceId],
+  ["created", e => e.createdAt],
+  ["last edited", e => e.ts],
+];
+
+function toCsv(entries) {
+  const lines = [EXPORT_COLUMNS.map(c => csvCell(c[0])).join(",")];
+  entries.forEach(e => lines.push(EXPORT_COLUMNS.map(c => csvCell(c[1](e))).join(",")));
+  // The byte order mark stops Excel mangling the Chinese item names.
+  return "\ufeff" + lines.join("\r\n") + "\r\n";
+}
+
+// Saves a file from what is already on this phone, so a backup can be taken
+// with no signal at all.
+function downloadFile(name, text, type) {
+  try {
+    const blob = new Blob([text], { type });
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(href), 2000);
+    return true;
+  } catch { return false; }
+}
+
 // The server owns the display number, so whichever side wins on content, the
 // number comes from the server. That is what stops two phones showing #12 twice.
 function mergeFromServer(local, remote) {
@@ -478,6 +525,8 @@ export default function App() {
   const [deployId, setDeployId] = useState(loadDeployId);
 
   const [deviceId] = useState(getDeviceId);
+  const [history, setHistory] = useState(null);
+  const [historyError, setHistoryError] = useState("");
   const entriesRef = useRef(entries);
   const dirtyRef = useRef(dirty);
   const cfgRef = useRef({ syncUrl, stallKey, market });
@@ -523,7 +572,13 @@ export default function App() {
 
     try {
       const queued = dirtyRef.current;
-      const outgoing = entriesRef.current.filter(e => queued.has(e.uid));
+      // The server has no catalog, so carry readable item names along with the
+      // ids. Without them an exported backup is a list of codes.
+      const outgoing = entriesRef.current.filter(e => queued.has(e.uid)).map(e => ({
+        ...e,
+        soldItemNames: (e.soldCatalogIds || [])
+          .map(id => CATALOG.find(c => c.id === id)?.name || id).join(", "),
+      }));
       const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
 
       let since = 0;
@@ -713,6 +768,31 @@ export default function App() {
     setTimeout(() => setSyncStatus(""), 2500);
   };
 
+  const downloadToday = () => {
+    const ok = downloadFile("nogooddesign-" + market + ".csv", toCsv(visible), "text/csv;charset=utf-8");
+    setSyncStatus(ok ? "saved" : "save failed");
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
+  const exportUrl = (day, format) =>
+    syncBase(syncUrl) + "/export?stall=" + encodeURIComponent(stallKey) +
+    "&market=" + encodeURIComponent(day) + "&format=" + format;
+
+  const loadHistory = async () => {
+    if (!syncConfigured) return;
+    setHistoryError("");
+    setHistory(null);
+    try {
+      const res = await fetch(syncBase(syncUrl) + "/markets?stall=" + encodeURIComponent(stallKey),
+        { signal: timeoutSignal(SYNC_TIMEOUT) });
+      if (!res.ok) { setHistoryError("could not load history"); return; }
+      const data = await res.json();
+      setHistory(Array.isArray(data.markets) ? data.markets : []);
+    } catch {
+      setHistoryError("could not reach the server");
+    }
+  };
+
   const copySetupLink = async () => {
     const link = buildSetupLink(syncUrl, stallKey, market);
     if (!link) return;
@@ -860,6 +940,44 @@ export default function App() {
             <p style={S.hint}>Send the setup link to the other phone and open it there. It carries the address, the key and the day.</p>
 
             <div style={S.rule} />
+            <label style={S.label}>Backup</label>
+            <p style={S.hint}>
+              A copy you keep yourself, so the day does not depend on this app or
+              this service still being here.
+            </p>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={downloadToday}>Save today as CSV</button>
+              <button style={S.modalBtn} onClick={exportData}>Copy as JSON</button>
+            </div>
+            <p style={S.hint}>Saving works with no signal. It uses what is on this phone.</p>
+
+            <div style={S.rule} />
+            <label style={S.label}>Past market days</label>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={loadHistory} disabled={!syncConfigured}>
+                {history ? "Refresh" : "Show days"}
+              </button>
+            </div>
+            {historyError && <p style={S.connectedText}>{historyError}</p>}
+            {history && history.length === 0 && <p style={S.hint}>Nothing saved on the server yet.</p>}
+            {history && history.length > 0 && (
+              <div style={S.historyList}>
+                {history.map(day => (
+                  <div key={day.market} style={S.historyRow}>
+                    <span style={S.historyDay}>
+                      {day.market}{day.market === market ? " (today)" : ""}
+                    </span>
+                    <span style={S.historyCount}>{day.entries}</span>
+                    <a style={S.historyLink} href={exportUrl(day.market, "csv")}
+                      target="_blank" rel="noreferrer">CSV</a>
+                    <a style={S.historyLink} href={exportUrl(day.market, "json")}
+                      target="_blank" rel="noreferrer">JSON</a>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={S.rule} />
             <label style={S.label}>Google Sheet export (optional)</label>
             <input style={S.modalInput} value={deployId}
               onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
@@ -870,7 +988,6 @@ export default function App() {
 
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={exportData}>Export JSON</button>
               <button style={S.modalBtn} onClick={clearData}>Clear local</button>
             </div>
           </div>
@@ -1092,6 +1209,11 @@ const S = {
   logo: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: BK, letterSpacing: "0.12em", textTransform: "uppercase" },
   headerStat: { fontFamily: SANS, fontSize: 11, color: BK },
   syncBadge: { fontSize: 10, color: BK },
+  historyList: { maxHeight: 180, overflowY: "auto", marginTop: 8 },
+  historyRow: { display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${BK}22` },
+  historyDay: { flex: 1, fontSize: 12, fontFamily: SANS, color: BK },
+  historyCount: { fontSize: 11, color: "#a09a92", minWidth: 24, textAlign: "right" },
+  historyLink: { fontSize: 11, color: BK, textDecoration: "underline", padding: "2px 0" },
   dayBadge: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "1px 5px", letterSpacing: "0.02em" },
   gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   rule: { height: 1, background: BK, flexShrink: 0 },
