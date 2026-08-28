@@ -1,0 +1,14 @@
+{
+  "name": "nogooddesign-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply nogooddesign --local",
+    "migrate": "wrangler d1 migrations apply nogooddesign --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.127.0"
+  }
+}
