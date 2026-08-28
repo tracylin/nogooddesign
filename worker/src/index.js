@@ -64,6 +64,29 @@ function toEntry(row) {
   return { ...body, uid: row.uid, id: row.seq, deletedAt: row.deleted_at, ts: row.updated_at };
 }
 
+// The tables are created on first use, so a fresh deployment works without
+// anyone having to run a migration by hand. Cached per isolate, so this costs
+// one extra round trip after a cold start and nothing after that.
+let schemaReady = null;
+function ensureSchema(db) {
+  if (!schemaReady) {
+    schemaReady = db.batch([
+      db.prepare(
+        "CREATE TABLE IF NOT EXISTS entries (" +
+        " stall TEXT NOT NULL, market TEXT NOT NULL, uid TEXT NOT NULL," +
+        " seq INTEGER NOT NULL, device_id TEXT, created_at TEXT," +
+        " updated_at TEXT NOT NULL, deleted_at TEXT, rev INTEGER NOT NULL," +
+        " body TEXT NOT NULL, PRIMARY KEY (stall, market, uid))"),
+      db.prepare("CREATE INDEX IF NOT EXISTS idx_entries_rev ON entries (stall, market, rev)"),
+      db.prepare(
+        "CREATE TABLE IF NOT EXISTS counters (" +
+        " stall TEXT NOT NULL, market TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0," +
+        " seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (stall, market))"),
+    ]).catch(e => { schemaReady = null; throw e; });
+  }
+  return schemaReady;
+}
+
 async function changesSince(db, stall, market, since) {
   const { results } = await db
     .prepare("SELECT uid, seq, deleted_at, updated_at, rev, body FROM entries " +
@@ -147,7 +170,11 @@ export default {
     if (!market || market.length > 64) return fail("market is required", 400);
     if (!Number.isFinite(since) || since < 0) return fail("since must be a number", 400);
 
+    if (!env.DB) return fail("the D1 database is not bound to this Worker", 500);
+
     try {
+      await ensureSchema(env.DB);
+
       if (request.method === "GET") {
         return json({ ok: true, ...(await changesSince(env.DB, stall, market, since)) });
       }
