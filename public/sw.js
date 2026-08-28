@@ -2,7 +2,7 @@
 // force-close and reopen would otherwise give you a blank screen.
 // Bump this whenever the shell changes in a way phones should not keep a stale
 // copy of. Activating drops every older cache.
-const SHELL = "ngd-shell-v4";
+const SHELL = "ngd-shell-v5";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
