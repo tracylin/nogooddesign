@@ -8,6 +8,10 @@ import { chromium } from "playwright";
 
 const APP = process.env.APP_URL || "http://127.0.0.1:5173/";
 const WORKER = process.env.SYNC_URL || "http://127.0.0.1:8787";
+// A fresh stall each run. A fixed one accumulates entries on the server, and
+// the counts below then measure previous runs rather than this one.
+const STALL = "offline-" + Math.random().toString(36).slice(2, 10);
+const MARKET = "2026-08-28";
 
 let pass = 0, fail = 0;
 const check = (name, cond, extra) => {
@@ -46,11 +50,11 @@ const active = await page.evaluate(async () => {
 check("a service worker is running", active);
 
 console.log("\n3. Some work is recorded, then the signal goes");
-await page.evaluate(([url]) => {
+await page.evaluate(([url, stall, market]) => {
   localStorage.setItem("ngd_sync_url", url);
-  localStorage.setItem("ngd_stall_key", "offlinetest12345");
-  localStorage.setItem("ngd_market", "2026-08-28");
-}, [WORKER]);
+  localStorage.setItem("ngd_stall_key", stall);
+  localStorage.setItem("ngd_market", market);
+}, [WORKER, STALL, MARKET]);
 await page.reload();
 await page.waitForTimeout(1200);
 await page.getByRole("button", { name: "✲" }).click();
