@@ -157,96 +157,276 @@ const CATALOG = [
 const CATEGORIES = ["All", "Hats", "Bags", "Charms", "Belts", "Rings", "Bracelets"];
 const ENGAGEMENTS = ["Stopped", "Touched", "Asked", "Bought"];
 
+// ─── IDENTITY ───
+// Entries are keyed by uid, never by the display number. A uid is minted on the
+// device that creates the entry and is never reused, so two phones adding a
+// customer at the same moment produce two different customers.
+const DEVICE_KEY = "ngd_device_id";
+
+function getDeviceId() {
+  try {
+    let d = localStorage.getItem(DEVICE_KEY);
+    if (!d) {
+      d = Math.random().toString(36).slice(2, 8);
+      localStorage.setItem(DEVICE_KEY, d);
+    }
+    return d;
+  } catch { return "anon"; }
+}
+
+function makeUid(deviceId) {
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8) + "-" + deviceId;
+}
+
+// Entries written before uids existed are keyed off their old numeric id so
+// every device derives the same uid for the same historical entry.
+function withIdentity(e) {
+  if (e.uid) return e;
+  return { ...e, uid: "legacy-" + e.id, deviceId: e.deviceId || "legacy", createdAt: e.createdAt || e.ts };
+}
+
 // ─── SYNC ENGINE ───
-const SYNC_INTERVAL = 20000; // 20s — faster polling
+const SYNC_INTERVAL = 20000; // 20s
 const BASE_URL = "https://script.google.com/macros/s/";
 function buildUrl(deployId) { return deployId ? BASE_URL + deployId + "/exec" : ""; }
 
-function mergeEntries(local, remote, deletedIds) {
-  const map = new Map();
-  // Remote is source of truth for what exists
-  remote.forEach(e => map.set(e.id, e));
-  // Local additions and updates
-  local.forEach(e => {
-    if (deletedIds.has(e.id)) return; // skip locally deleted
-    const existing = map.get(e.id);
-    if (!existing) { map.set(e.id, e); } // new local entry
-    else if (e.ts > existing.ts) { map.set(e.id, e); } // local is newer
+function sortEntries(arr) {
+  return [...arr].sort((a, b) => {
+    const ka = a.createdAt || a.ts || "";
+    const kb = b.createdAt || b.ts || "";
+    if (ka !== kb) return kb.localeCompare(ka);
+    return (b.id || 0) - (a.id || 0);
   });
-  // Remove anything in deletedIds
-  deletedIds.forEach(id => map.delete(id));
-  return Array.from(map.values()).sort((a, b) => b.id - a.id);
 }
 
-// Debounced push — waits 500ms after last call before firing
-let pushTimer = null;
-let pushQueue = null;
+// Tombstones older than a week are dropped so the payload does not grow forever.
+const TOMBSTONE_TTL = 7 * 24 * 60 * 60 * 1000;
+function pruneTombstones(entries) {
+  const cutoff = Date.now() - TOMBSTONE_TTL;
+  return entries.filter(e => !e.deletedAt || new Date(e.deletedAt).getTime() > cutoff);
+}
 
-function debouncedPush(deployId, entries) {
-  pushQueue = { deployId, entries };
-  if (pushTimer) clearTimeout(pushTimer);
-  pushTimer = setTimeout(() => {
-    if (pushQueue) {
-      pushState(pushQueue.deployId, pushQueue.entries);
-      pushQueue = null;
+function enrich(entries) {
+  return entries.map(e => ({
+    ...e,
+    soldItemNames: (e.soldCatalogIds || [])
+      .map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; })
+      .join(", "),
+  }));
+}
+
+// Every network call reports what actually happened. The old code used
+// mode: "no-cors", which made a rejected write look exactly like a successful
+// one, so nothing could ever be retried.
+//
+// Some Apps Script deployments do not return readable CORS headers on POST. If
+// that happens the request still reaches the script, so rather than calling it a
+// failure we send it again in the old opaque mode and say plainly that the write
+// could not be confirmed. setState always sends the full state, so sending it
+// twice changes nothing.
+async function postState(url, payload) {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
+    return { ok: true, confirmed: true };
+  } catch {
+    try {
+      await fetch(url, {
+        method: "POST", mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload),
+      });
+      return { ok: true, confirmed: false };
+    } catch (e) {
+      return { ok: false, error: e.message || "no connection" };
     }
-  }, 500);
+  }
 }
 
 async function pushState(deployId, entries) {
   const url = buildUrl(deployId);
-  if (!url) return;
-  try {
-    const enriched = entries.map(e => ({
-      ...e,
-      soldItemNames: (e.soldCatalogIds || []).map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; }).join(", "),
-    }));
-    await fetch(url, {
-      method: "POST", mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({
-        action: "setState",
-        state: { entries: enriched, lastModified: new Date().toISOString() },
-      }),
-    });
-  } catch (e) { console.warn("Push failed:", e); }
+  if (!url) return { ok: false, error: "no sheet connected" };
+  return postState(url, {
+    action: "setState",
+    state: { entries: enrich(entries), lastModified: new Date().toISOString() },
+  });
 }
 
 async function pushLog(deployId, entry, action) {
   const url = buildUrl(deployId);
-  if (!url) return;
+  if (!url) return { ok: false, error: "no sheet connected" };
   try {
-    await fetch(url, {
-      method: "POST", mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
         action: "log",
         row: {
           timestamp: new Date().toISOString(),
           entryId: entry.id,
+          uid: entry.uid || "",
+          device: entry.deviceId || "",
           type: action,
           engage: entry.engage || "",
           amount: entry.amount || "",
           items: entry.items || "",
-          soldItemNames: (entry.soldCatalogIds || []).map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; }).join(", "),
+          soldItemNames: (entry.soldCatalogIds || [])
+            .map(id => { const c = CATALOG.find(x => x.id === id); return c ? c.name : id; })
+            .join(", "),
           payment: entry.payment || "",
           note: entry.note || "",
           raw: JSON.stringify(entry),
         },
       }),
     });
-  } catch (e) { console.warn("Log failed:", e); }
+    if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message || "no connection" };
+  }
 }
 
-async function pullState(deployId) {
-  const url = buildUrl(deployId);
-  if (!url) return null;
+// ─── WORKER SYNC ───
+// Each entry is its own row on the server, so a push says "here are the three
+// entries I changed" instead of "here is everything I know". Two phones adding
+// customers at the same time no longer overwrite one another.
+function makeStallKey() {
+  const raw = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
+  return raw.replace(/-/g, "").slice(0, 20);
+}
+
+function todayMarket(d = new Date()) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function cursorKey(stall, market) { return "ngd_cursor:" + stall + ":" + market; }
+
+// The server owns the display number, so whichever side wins on content, the
+// number comes from the server. That is what stops two phones showing #12 twice.
+function mergeFromServer(local, remote) {
+  const byUid = new Map(local.map(e => [e.uid, e]));
+  remote.forEach(r => {
+    const l = byUid.get(r.uid);
+    if (!l) { byUid.set(r.uid, r); return; }
+    const winner = (r.ts || "") >= (l.ts || "") ? r : l;
+    byUid.set(r.uid, { ...winner, id: r.id ?? winner.id });
+  });
+  return sortEntries(Array.from(byUid.values()));
+}
+
+// One round trip does both directions: it sends what changed here and returns
+// what changed anywhere else since the cursor.
+async function syncWithWorker({ url, stall, market, since, rows }) {
+  const base = String(url).replace(/\/+$/, "");
+  const endpoint = base + "/sync?stall=" + encodeURIComponent(stall) +
+    "&market=" + encodeURIComponent(market) + "&since=" + since;
   try {
-    const res = await fetch(url + "?action=getState&t=" + Date.now()); // cache-bust
-    if (!res.ok) return null;
+    const res = rows.length
+      ? await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows }),
+        })
+      : await fetch(endpoint);
+    if (!res.ok) {
+      let message = "sync returned " + res.status;
+      try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep the status */ }
+      return { ok: false, error: message };
+    }
     const data = await res.json();
-    return data?.entries || null;
-  } catch (e) { console.warn("Pull failed:", e); return null; }
+    return {
+      ok: true,
+      cursor: Number(data.cursor) || 0,
+      rows: Array.isArray(data.rows) ? data.rows : [],
+    };
+  } catch (e) {
+    return { ok: false, error: e.message || "no connection" };
+  }
+}
+
+// Read straight into the first render. The old code loaded in an effect, and the
+// save effect fired in the same commit with an empty list, briefly overwriting
+// the saved day.
+function loadSavedEntries() {
+  let loaded = [];
+  try {
+    const saved = localStorage.getItem("ngd_entries");
+    if (saved) loaded = JSON.parse(saved).map(e => withIdentity(e));
+  } catch { /* storage unavailable, carry on */ }
+
+  // One time migration. Deletions used to live in a local only list, which is
+  // why deleted entries kept coming back from the other phone. Turn them into
+  // real tombstones so they can travel.
+  try {
+    const old = localStorage.getItem("ngd_deleted");
+    if (old) {
+      const now = new Date().toISOString();
+      const have = new Set(loaded.map(e => e.uid));
+      JSON.parse(old).forEach(id => {
+        const uid = "legacy-" + id;
+        if (have.has(uid)) return;
+        loaded.push({ uid, id, deviceId: "legacy", time: "", engage: "", amount: "", items: "",
+          soldCatalogIds: [], payment: "", note: "", createdAt: now, ts: now, deletedAt: now });
+      });
+      localStorage.removeItem("ngd_deleted");
+    }
+  } catch { /* storage unavailable, carry on */ }
+
+  return sortEntries(loaded);
+}
+
+function loadStr(key) {
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+
+function saveStr(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* storage unavailable, carry on */ }
+}
+
+function loadDeployId() { return loadStr("ngd_deploy_id"); }
+
+// Generated once per stall, then shared with the other phones. It is both the
+// namespace on the server and the only thing keeping the data private, which is
+// why it is long and random rather than something memorable.
+function loadStallKey() {
+  const existing = loadStr("ngd_stall_key");
+  if (existing) return existing;
+  const fresh = makeStallKey();
+  saveStr("ngd_stall_key", fresh);
+  return fresh;
+}
+
+function loadMarket() {
+  return loadStr("ngd_market") || todayMarket();
+}
+
+// Setting up the second phone by typing a twenty character key on a phone
+// keyboard is miserable, so the settings screen can hand over a link that
+// carries the whole configuration instead.
+function setupParams() {
+  try { return new URLSearchParams(window.location.search); } catch { return new URLSearchParams(); }
+}
+
+function buildSetupLink(syncUrl, stallKey, market) {
+  try {
+    const u = new URL(window.location.href);
+    u.search = "";
+    u.hash = "";
+    const q = new URLSearchParams({ sync: syncUrl, stall: stallKey, market });
+    return u.toString() + "?" + q.toString();
+  } catch { return ""; }
+}
+
+// Entries changed here but not yet accepted by the server.
+function loadDirty() {
+  try {
+    const raw = localStorage.getItem("ngd_dirty");
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch { return new Set(); }
 }
 
 const GearIcon = () => (
@@ -257,216 +437,275 @@ const GearIcon = () => (
 );
 export default function App() {
   const [tab, setTab] = useState("count");
-  const [entries, setEntries] = useState([]);
-  const [expandedId, setExpandedId] = useState(null);
-  const [nextId, setNextId] = useState(1);
-  const [deployId, setDeployId] = useState("");
+  const [entries, setEntries] = useState(loadSavedEntries);
+  const [expandedUid, setExpandedUid] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("All");
   const [showCatalogPicker, setShowCatalogPicker] = useState(null);
   const [pickerCat, setPickerCat] = useState("All");
   const [syncStatus, setSyncStatus] = useState("");
-  const [deletedIds, setDeletedIds] = useState(new Set());
-  const [syncDiffs, setSyncDiffs] = useState(null); // { diffs: [...], remote: [...], direction: "down"|"up" }
-  const entriesRef = useRef(entries);
-  const deletedRef = useRef(deletedIds);
-  entriesRef.current = entries;
-  deletedRef.current = deletedIds;
+  const [syncError, setSyncError] = useState("");
 
-  // Load from localStorage (persists across tabs, sessions, reloads)
+  // Worker sync
+  const [syncUrl, setSyncUrl] = useState(() => setupParams().get("sync") || loadStr("ngd_sync_url"));
+  const [stallKey, setStallKey] = useState(() => setupParams().get("stall") || loadStallKey());
+  const [market, setMarket] = useState(() => setupParams().get("market") || loadMarket());
+  const [dirty, setDirty] = useState(loadDirty);
+
+  // The Google Sheet is now an export, not the database
+  const [deployId, setDeployId] = useState(loadDeployId);
+
+  const [deviceId] = useState(getDeviceId);
+  const entriesRef = useRef(entries);
+  const dirtyRef = useRef(dirty);
+  const cfgRef = useRef({ syncUrl, stallKey, market });
+  const syncing = useRef(false);
+  useEffect(() => { entriesRef.current = entries; }, [entries]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+  useEffect(() => { cfgRef.current = { syncUrl, stallKey, market }; }, [syncUrl, stallKey, market]);
+
+  // The stall key is a secret, so it does not stay sitting in the address bar
+  // where it would end up in history and in screenshots.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("ngd_entries");
-      if (saved) { const p = JSON.parse(saved); setEntries(p); setNextId(p.length > 0 ? Math.max(...p.map(e => e.id)) + 1 : 1); }
-    } catch {}
-    try { const u = localStorage.getItem("ngd_deploy_id"); if (u) setDeployId(u); } catch {}
-    try { const d = localStorage.getItem("ngd_deleted"); if (d) setDeletedIds(new Set(JSON.parse(d))); } catch {}
+    if (!window.location.search) return;
+    try { window.history.replaceState({}, "", window.location.pathname); } catch { /* history unavailable, carry on */ }
   }, []);
 
-  // Save to localStorage on every change
-  useEffect(() => { try { localStorage.setItem("ngd_entries", JSON.stringify(entries)); } catch {} }, [entries]);
-  useEffect(() => { try { localStorage.setItem("ngd_deploy_id", deployId); } catch {} }, [deployId]);
-  useEffect(() => { try { localStorage.setItem("ngd_deleted", JSON.stringify([...deletedIds])); } catch {} }, [deletedIds]);
+  // ── save ──
+  useEffect(() => {
+    try { localStorage.setItem("ngd_entries", JSON.stringify(entries)); } catch { /* storage unavailable, carry on */ }
+  }, [entries]);
+  useEffect(() => { saveStr("ngd_sync_url", syncUrl); }, [syncUrl]);
+  useEffect(() => { saveStr("ngd_stall_key", stallKey); }, [stallKey]);
+  useEffect(() => { saveStr("ngd_market", market); }, [market]);
+  useEffect(() => { saveStr("ngd_deploy_id", deployId); }, [deployId]);
+  useEffect(() => {
+    try { localStorage.setItem("ngd_dirty", JSON.stringify([...dirty])); } catch { /* storage unavailable, carry on */ }
+  }, [dirty]);
 
-  // Compute diffs between local and remote
-  const computeDiffs = useCallback((local, remote) => {
-    const localMap = new Map(local.map(e => [e.id, e]));
-    const remoteMap = new Map(remote.map(e => [e.id, e]));
-    const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
-    const diffs = [];
+  const markDirty = useCallback((uid) => {
+    setDirty(prev => (prev.has(uid) ? prev : new Set(prev).add(uid)));
+  }, []);
 
-    allIds.forEach(id => {
-      const l = localMap.get(id);
-      const r = remoteMap.get(id);
-      const deleted = deletedIds.has(id);
+  // ── sync ──
+  // Sends only what changed here, receives only what changed elsewhere. Anything
+  // that fails to send stays in the queue and goes out on the next attempt, so a
+  // dead spot at the stall costs nothing.
+  const runSync = useCallback(async (manual) => {
+    const { syncUrl: url, stallKey: stall, market: day } = cfgRef.current;
+    if (!url || !stall || !day || syncing.current) return;
+    syncing.current = true;
+    if (manual) setSyncStatus("syncing…");
 
-      if (l && r) {
-        // Exists on both — check if different
-        if (l.ts !== r.ts || l.engage !== r.engage || l.amount !== r.amount || l.note !== r.note ||
-            JSON.stringify(l.soldCatalogIds) !== JSON.stringify(r.soldCatalogIds) || l.payment !== r.payment) {
-          diffs.push({ id, type: "conflict", local: l, remote: r, keep: l.ts >= r.ts ? "local" : "remote" });
-        }
-      } else if (l && !r) {
-        if (deleted) {
-          diffs.push({ id, type: "deleted_local", local: l, keep: "delete" });
-        } else {
-          diffs.push({ id, type: "local_only", local: l, keep: "keep" });
-        }
-      } else if (!l && r) {
-        if (deleted) {
-          diffs.push({ id, type: "deleted_local_exists_remote", remote: r, keep: "delete" });
-        } else {
-          diffs.push({ id, type: "remote_only", remote: r, keep: "keep" });
-        }
-      }
-    });
+    const queued = dirtyRef.current;
+    const outgoing = entriesRef.current.filter(e => queued.has(e.uid));
+    const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
 
-    return diffs.sort((a, b) => b.id - a.id);
-  }, [deletedIds]);
+    let since = 0;
+    try { since = parseInt(localStorage.getItem(cursorKey(stall, day)) || "0", 10) || 0; } catch { /* storage unavailable, carry on */ }
 
-  // Start sync review (download or upload)
-  const startSyncReview = useCallback(async (direction) => {
-    if (!deployId) return;
-    setSyncStatus("loading…");
-    setShowSettings(false);
-    try {
-      const remote = await pullState(deployId);
-      const remoteEntries = (remote && Array.isArray(remote)) ? remote : [];
-      const diffs = computeDiffs(entries, remoteEntries);
-      if (diffs.length === 0) {
-        setSyncStatus("No differences");
-        setTimeout(() => setSyncStatus(""), 2000);
-        return;
-      }
-      setSyncDiffs({ diffs, remote: remoteEntries, direction });
+    const result = await syncWithWorker({ url, stall, market: day, since, rows: outgoing });
+    syncing.current = false;
+
+    if (!result.ok) {
+      setSyncError(result.error);
       setSyncStatus("");
-    } catch {
-      setSyncStatus("sync failed");
-      setTimeout(() => setSyncStatus(""), 2000);
+      return;
     }
-  }, [deployId, entries, computeDiffs]);
 
-  // Apply resolved diffs
-  const applyDiffs = useCallback(async () => {
-    if (!syncDiffs) return;
-    const localMap = new Map(entries.map(e => [e.id, e]));
-    const remoteMap = new Map(syncDiffs.remote.map(e => [e.id, e]));
-    const result = new Map();
-    const newDeletedIds = new Set(deletedIds);
+    try { localStorage.setItem(cursorKey(stall, day), String(result.cursor)); } catch { /* storage unavailable, carry on */ }
+    if (result.rows.length) setEntries(prev => pruneTombstones(mergeFromServer(prev, result.rows)));
 
-    // Start with entries that had no diffs
-    const diffIds = new Set(syncDiffs.diffs.map(d => d.id));
-    entries.forEach(e => { if (!diffIds.has(e.id)) result.set(e.id, e); });
-    syncDiffs.remote.forEach(e => { if (!diffIds.has(e.id) && !result.has(e.id)) result.set(e.id, e); });
-
-    // Apply each diff resolution
-    syncDiffs.diffs.forEach(d => {
-      if (d.keep === "delete") {
-        newDeletedIds.add(d.id);
-        // don't add to result
-      } else if (d.keep === "local") {
-        if (d.local) result.set(d.id, d.local);
-      } else if (d.keep === "remote") {
-        if (d.remote) result.set(d.id, d.remote);
-      } else if (d.keep === "keep") {
-        const entry = d.local || d.remote;
-        if (entry) result.set(d.id, entry);
-      } else if (d.keep === "discard") {
-        // don't add
-      }
+    // Only clear what was actually sent, and only if it has not been edited again
+    // while the request was in flight.
+    setDirty(prev => {
+      const next = new Set(prev);
+      sentAt.forEach((ts, uid) => {
+        const now = entriesRef.current.find(e => e.uid === uid);
+        if (!now || now.ts === ts) next.delete(uid);
+      });
+      return next;
     });
 
-    const merged = Array.from(result.values()).sort((a, b) => b.id - a.id);
-    setEntries(merged);
-    setDeletedIds(newDeletedIds);
-    setNextId(merged.length > 0 ? Math.max(...merged.map(e => e.id)) + 1 : 1);
-
-    // Always push resolved state to sheet
-    await pushState(deployId, merged);
-
-    setSyncDiffs(null);
+    setSyncError("");
     setSyncStatus("synced");
-    setTimeout(() => setSyncStatus(""), 2000);
-  }, [syncDiffs, entries, deletedIds, deployId]);
+    setTimeout(() => setSyncStatus(s => (s === "synced" ? "" : s)), 1500);
+  }, []);
 
-  // Legacy doSync kept for compatibility
-  const doSync = useCallback(async () => { startSyncReview("down"); }, [startSyncReview]);
-  const doUpload = useCallback(async () => { startSyncReview("up"); }, [startSyncReview]);
+  useEffect(() => {
+    if (!syncUrl || !stallKey || !market) return;
+    const first = setTimeout(() => runSync(false), 300);
+    const t = setInterval(() => runSync(false), SYNC_INTERVAL);
+    return () => { clearTimeout(first); clearInterval(t); };
+  }, [syncUrl, stallKey, market, runSync]);
 
-  // Log only, no auto-push
-  const pushUpdate = useCallback((newEntries, changedEntry, action) => {
-    if (changedEntry) pushLog(deployId, changedEntry, action);
+  // Sync as soon as the phone comes back, rather than waiting out the timer.
+  useEffect(() => {
+    const wake = () => { if (document.visibilityState === "visible") runSync(false); };
+    window.addEventListener("online", wake);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      window.removeEventListener("online", wake);
+      document.removeEventListener("visibilitychange", wake);
+    };
+  }, [runSync]);
+
+  const logAction = useCallback((entry, action) => {
+    if (entry && deployId) pushLog(deployId, entry, action);
   }, [deployId]);
+
+  // A provisional number so the entry reads correctly before it has synced. The
+  // server replaces it with one that is unique across every phone.
+  const claimNumber = useCallback((current) => {
+    let stored = 0;
+    try { stored = parseInt(localStorage.getItem("ngd_seq") || "0", 10) || 0; } catch { /* storage unavailable, carry on */ }
+    const highest = current.reduce((m, e) => Math.max(m, e.id || 0), 0);
+    const next = Math.max(stored, highest) + 1;
+    try { localStorage.setItem("ngd_seq", String(next)); } catch { /* storage unavailable, carry on */ }
+    return next;
+  }, []);
 
   const addEntry = useCallback(() => {
     const now = new Date();
-    const time = now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-    const newId = entries.length > 0 ? Math.max(...entries.map(e => e.id)) + 1 : 1;
-    const entry = { id: newId, time, engage: "", amount: "", items: "", soldCatalogIds: [], payment: "", note: "", ts: now.toISOString() };
-    const newEntries = [entry, ...entries];
-    setEntries(newEntries);
-    setExpandedId(newId);
-    setNextId(newId + 1);
-    pushUpdate(newEntries, entry, "add");
-  }, [entries, pushUpdate]);
+    const entry = {
+      uid: makeUid(deviceId),
+      deviceId,
+      id: claimNumber(entries),
+      time: now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+      engage: "", amount: "", amountManual: false, items: "", soldCatalogIds: [],
+      payment: "", note: "",
+      createdAt: now.toISOString(), ts: now.toISOString(), deletedAt: null,
+    };
+    setEntries(prev => sortEntries([entry, ...prev]));
+    setExpandedUid(entry.uid);
+    markDirty(entry.uid);
+    logAction(entry, "add");
+  }, [entries, deviceId, claimNumber, markDirty, logAction]);
 
+  const deleteEntry = useCallback((uid) => {
+    const stamp = new Date().toISOString();
+    setEntries(prev => prev.map(e => (e.uid === uid ? { ...e, deletedAt: stamp, ts: stamp } : e)));
+    setExpandedUid(null);
+    markDirty(uid);
+    const entry = entriesRef.current.find(e => e.uid === uid);
+    if (entry) logAction({ ...entry, deletedAt: stamp }, "delete");
+  }, [markDirty, logAction]);
+
+  // Removes the newest entry this phone created, never whatever happens to be at
+  // the top of a merged list.
   const undoEntry = useCallback(() => {
-    if (entries.length === 0) return;
-    const removed = entries[0];
-    const newEntries = entries.slice(1);
-    setEntries(newEntries);
-    setExpandedId(null);
-    setDeletedIds(prev => new Set([...prev, removed.id]));
-    pushUpdate(newEntries, removed, "undo");
-  }, [entries, pushUpdate]);
+    const mine = entries.filter(e => !e.deletedAt && e.deviceId === deviceId);
+    if (mine.length === 0) return;
+    deleteEntry(mine[0].uid);
+  }, [entries, deviceId, deleteEntry]);
 
-  const deleteEntry = useCallback((id) => {
-    const removed = entries.find(e => e.id === id);
-    const newEntries = entries.filter(e => e.id !== id);
-    setEntries(newEntries);
-    setExpandedId(null);
-    setDeletedIds(prev => new Set([...prev, id]));
-    pushUpdate(newEntries, removed, "delete");
-  }, [entries, pushUpdate]);
-
-  const updateEntry = useCallback((id, field, value) => {
-    const newEntries = entries.map(e => e.id === id ? { ...e, [field]: value, ts: new Date().toISOString() } : e);
-    setEntries(newEntries);
-  }, [entries]);
-
-  const saveAndCollapse = useCallback((id) => {
-    setExpandedId(null);
-    const entry = entries.find(e => e.id === id);
-    if (entry) pushUpdate(entries, entry, "update");
-  }, [entries, pushUpdate]);
-
-  const toggleSoldItem = useCallback((entryId, catalogId) => {
+  const updateEntry = useCallback((uid, field, value) => {
     setEntries(prev => prev.map(e => {
-      if (e.id !== entryId) return e;
+      if (e.uid !== uid) return e;
+      const patch = { [field]: value, ts: new Date().toISOString() };
+      if (field === "amount") patch.amountManual = true;
+      return { ...e, ...patch };
+    }));
+    markDirty(uid);
+  }, [markDirty]);
+
+  const saveAndCollapse = useCallback((uid) => {
+    setExpandedUid(null);
+    const entry = entriesRef.current.find(e => e.uid === uid);
+    if (entry) logAction(entry, "update");
+    runSync(false);
+  }, [logAction, runSync]);
+
+  const toggleSoldItem = useCallback((uid, catalogId) => {
+    setEntries(prev => prev.map(e => {
+      if (e.uid !== uid) return e;
       const ids = e.soldCatalogIds || [];
       const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
-      const oldSum = ids.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
-      const newSum = next.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
-      const wasAutoFilled = !e.amount || e.amount === "" || e.amount === String(oldSum);
-      return { ...e, soldCatalogIds: next, amount: wasAutoFilled ? String(newSum) : e.amount, ts: new Date().toISOString() };
+      const sum = next.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
+      return {
+        ...e,
+        soldCatalogIds: next,
+        amount: e.amountManual ? e.amount : String(sum),
+        ts: new Date().toISOString(),
+      };
     }));
-  }, []);
+    markDirty(uid);
+  }, [markDirty]);
 
-  // Derived: all sold catalog IDs across all entries
-  const allSoldIds = new Set();
-  entries.forEach(e => { if (e.engage === "Bought" && e.soldCatalogIds) e.soldCatalogIds.forEach(id => allSoldIds.add(id)); });
+  // ── derived ──
+  const visible = entries.filter(e => !e.deletedAt);
 
-  const totalCount = entries.length;
-  const boughtCount = entries.filter(e => e.engage === "Bought").length;
-  const totalRevenue = entries.reduce((s, e) => { const a = parseFloat(e.amount); return s + (isNaN(a) ? 0 : a); }, 0);
+  // Stock is counted, not flagged, so an item with two units survives one sale.
+  const soldCounts = new Map();
+  visible.forEach(e => (e.soldCatalogIds || []).forEach(id => soldCounts.set(id, (soldCounts.get(id) || 0) + 1)));
+  const soldOutIds = new Set();
+  CATALOG.forEach(item => { if ((soldCounts.get(item.id) || 0) >= (item.qty || 1)) soldOutIds.add(item.id); });
 
-  const exportData = () => { navigator.clipboard?.writeText?.(JSON.stringify(entries, null, 2)); alert("Copied"); };
-  const clearData = () => { if (confirm("Clear local data? Sheet is safe.")) { setEntries([]); setNextId(1); setExpandedId(null); setDeletedIds(new Set()); } };
+  const totalCount = visible.length;
+  const boughtCount = visible.filter(e => e.engage === "Bought").length;
+  const totalRevenue = visible.reduce((s, e) => {
+    if (e.engage !== "Bought") return s;
+    const a = parseFloat(e.amount);
+    return s + (isNaN(a) ? 0 : a);
+  }, 0);
+
+  const unsentCount = dirty.size;
+  const syncConfigured = Boolean(syncUrl && stallKey && market);
+
+  const exportToSheet = async () => {
+    if (!deployId) return;
+    setSyncStatus("exporting…");
+    const result = await pushState(deployId, visible);
+    setSyncStatus(result.ok ? (result.confirmed ? "exported" : "sent") : "export failed");
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
+  const copySetupLink = async () => {
+    const link = buildSetupLink(syncUrl, stallKey, market);
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      setSyncStatus("link copied");
+    } catch {
+      setSyncStatus("copy failed");
+    }
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
+  const exportData = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(visible, null, 2));
+      setSyncStatus("copied");
+    } catch {
+      setSyncStatus("copy failed");
+    }
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
+  const startNewMarket = () => {
+    const today = todayMarket();
+    if (today === market) return;
+    if (!confirm("Start a new market day (" + today + ")? Today's list clears on this phone. " + market + " stays on the server.")) return;
+    setMarket(today);
+    setEntries([]);
+    setDirty(new Set());
+    setExpandedUid(null);
+  };
+
+  const clearData = () => {
+    if (confirm("Clear this phone's copy? The server keeps everything, and the next sync pulls it back.")) {
+      setEntries([]);
+      setExpandedUid(null);
+      try { localStorage.removeItem(cursorKey(stallKey, market)); } catch { /* storage unavailable, carry on */ }
+    }
+  };
 
   const filteredCatalog = CATALOG.filter(item => {
     const matchCat = catFilter === "All" || item.category === catFilter;
-    const matchSearch = !search || item.name.toLowerCase().includes(search.toLowerCase()) || (item.price && item.price.toString().includes(search));
+    const q = search.trim().toLowerCase();
+    const matchSearch = !q || item.name.toLowerCase().includes(q) ||
+      (item.price != null && String(item.price) === q.replace(/^\$/, ""));
     return matchCat && matchSearch;
   });
   const grouped = {};
@@ -475,95 +714,11 @@ export default function App() {
   return (
     <div style={S.shell}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Instrument+Serif&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #ece8e1; }
         input::placeholder { color: #a09a92; }
         input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
         ::-webkit-scrollbar { width: 0; }
       `}</style>
-
-      {/* SYNC DIFF REVIEW MODAL */}
-      {syncDiffs && (
-        <div style={S.overlay} onClick={() => setSyncDiffs(null)}>
-          <div style={S.diffModal} onClick={e => e.stopPropagation()}>
-            <div style={S.pickerHead}>
-              <span style={S.pickerTitle}>Sync review</span>
-              <button style={S.closeBtn} onClick={() => setSyncDiffs(null)}>✕</button>
-            </div>
-            <div style={S.rule} />
-            <div style={S.diffCount}>{syncDiffs.diffs.length} difference{syncDiffs.diffs.length !== 1 ? "s" : ""} found</div>
-            <div style={S.rule} />
-            <div style={S.diffList}>
-              {syncDiffs.diffs.map(d => (
-                <div key={d.id} style={S.diffItem}>
-                  <div style={S.diffHeader}>
-                    <span style={S.diffId}>#{d.id}</span>
-                    <span style={S.diffType}>
-                      {d.type === "conflict" && "different on both sides"}
-                      {d.type === "local_only" && "local only — not on sheet"}
-                      {d.type === "remote_only" && "sheet only — not on phone"}
-                      {d.type === "deleted_local" && "deleted locally"}
-                      {d.type === "deleted_local_exists_remote" && "deleted locally, still on sheet"}
-                    </span>
-                  </div>
-                  {d.type === "conflict" && (
-                    <div style={S.diffDetail}>
-                      <div style={S.diffSide}>Local: {d.local.engage || "—"} {d.local.amount ? "$" + d.local.amount : ""} {d.local.note || ""}</div>
-                      <div style={S.diffSide}>Sheet: {d.remote.engage || "—"} {d.remote.amount ? "$" + d.remote.amount : ""} {d.remote.note || ""}</div>
-                    </div>
-                  )}
-                  {(d.type === "local_only" || d.type === "deleted_local") && d.local && (
-                    <div style={S.diffDetail}>
-                      <div style={S.diffSide}>{d.local.engage || "—"} {d.local.amount ? "$" + d.local.amount : ""} {d.local.note || ""}</div>
-                    </div>
-                  )}
-                  {(d.type === "remote_only" || d.type === "deleted_local_exists_remote") && d.remote && (
-                    <div style={S.diffDetail}>
-                      <div style={S.diffSide}>{d.remote.engage || "—"} {d.remote.amount ? "$" + d.remote.amount : ""} {d.remote.note || ""}</div>
-                    </div>
-                  )}
-                  <div style={S.diffActions}>
-                    {d.type === "conflict" && (
-                      <>
-                        <button style={d.keep === "local" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "local" } : x) }))}>Use local</button>
-                        <button style={d.keep === "remote" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "remote" } : x) }))}>Use sheet</button>
-                      </>
-                    )}
-                    {d.type === "local_only" && (
-                      <>
-                        <button style={d.keep === "keep" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "keep" } : x) }))}>Keep</button>
-                        <button style={d.keep === "discard" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "discard" } : x) }))}>Discard</button>
-                      </>
-                    )}
-                    {d.type === "remote_only" && (
-                      <>
-                        <button style={d.keep === "keep" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "keep" } : x) }))}>Keep</button>
-                        <button style={d.keep === "discard" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "discard" } : x) }))}>Discard</button>
-                      </>
-                    )}
-                    {(d.type === "deleted_local" || d.type === "deleted_local_exists_remote") && (
-                      <>
-                        <button style={d.keep === "delete" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "delete" } : x) }))}>Delete</button>
-                        <button style={d.keep === "keep" ? S.diffBtnActive : S.diffBtn}
-                          onClick={() => setSyncDiffs(prev => ({ ...prev, diffs: prev.diffs.map(x => x.id === d.id ? { ...x, keep: "keep" } : x) }))}>Restore</button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-            <button style={S.pickerDoneBtn} onClick={applyDiffs}>Apply {syncDiffs.diffs.length} changes</button>
-          </div>
-        </div>
-      )}
 
       {/* CATALOG PICKER MODAL */}
       {showCatalogPicker !== null && (
@@ -582,9 +737,9 @@ export default function App() {
             <div style={S.rule} />
             <div style={S.pickerList}>
               {CATALOG.filter(c => pickerCat === "All" || c.category === pickerCat).map(item => {
-                const entry = entries.find(e => e.id === showCatalogPicker);
+                const entry = visible.find(e => e.uid === showCatalogPicker);
                 const isSelected = entry?.soldCatalogIds?.includes(item.id);
-                const isSoldByOther = allSoldIds.has(item.id) && !isSelected;
+                const isSoldByOther = soldOutIds.has(item.id) && !isSelected;
                 return (
                   <div key={item.id} style={{ ...S.pickerItem, textDecoration: isSoldByOther ? "line-through" : "none" }}
                     onClick={() => !isSoldByOther && toggleSoldItem(showCatalogPicker, item.id)}>
@@ -612,14 +767,53 @@ export default function App() {
               <button style={S.closeBtn} onClick={() => setShowSettings(false)}>✕</button>
             </div>
             <div style={S.rule} />
-            <label style={S.label}>Google Sheets Deployment ID</label>
-            <input style={S.modalInput} value={deployId} onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
-            <p style={S.hint}>Apps Script → Deploy → Web app → copy the ID from the URL</p>
-            {deployId && <p style={S.connectedText}>Connected · manual sync only</p>}
+            <label style={S.label}>Sync address</label>
+            <input style={S.modalInput} value={syncUrl} inputMode="url"
+              onChange={e => setSyncUrl(e.target.value.trim())}
+              placeholder="https://nogooddesign-sync.workers.dev" />
+            <p style={S.hint}>Paste the same address into every phone</p>
+
+            <label style={S.label}>Stall key</label>
+            <input style={S.modalInput} value={stallKey}
+              onChange={e => setStallKey(e.target.value.trim())} placeholder="20 characters" />
+            <p style={S.hint}>
+              Your phones share this. It keeps the stall private, so treat it like a password.
+            </p>
+
+            <label style={S.label}>Market day</label>
+            <input style={S.modalInput} value={market}
+              onChange={e => setMarket(e.target.value.trim())} placeholder="2026-08-28" />
+            {market !== todayMarket() && (
+              <button style={S.modalBtn} onClick={startNewMarket}>Start today ({todayMarket()})</button>
+            )}
+
+            {syncConfigured && (
+              <p style={S.connectedText}>
+                {syncError
+                  ? "Cannot reach sync: " + syncError
+                  : unsentCount > 0
+                    ? unsentCount + " waiting to send"
+                    : "Connected \u00b7 syncing every 20s"}
+              </p>
+            )}
+            <p style={S.hint}>This phone is {deviceId}</p>
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={() => { startSyncReview("sync"); setShowSettings(false); }}>Sync with sheet</button>
+              <button style={S.modalBtn} onClick={() => { runSync(true); setShowSettings(false); }}>Sync now</button>
+              <button style={S.modalBtn} onClick={copySetupLink} disabled={!syncConfigured}>Copy setup link</button>
             </div>
+            <p style={S.hint}>Send the setup link to the other phone and open it there. It carries the address, the key and the day.</p>
+
+            <div style={S.rule} />
+            <label style={S.label}>Google Sheet export (optional)</label>
+            <input style={S.modalInput} value={deployId}
+              onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
+            <p style={S.hint}>Apps Script deployment ID. The sheet is a backup now, not the source.</p>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={exportToSheet} disabled={!deployId}>Send today to sheet</button>
+            </div>
+
+            <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={exportData}>Export JSON</button>
               <button style={S.modalBtn} onClick={clearData}>Clear local</button>
@@ -632,7 +826,11 @@ export default function App() {
       <div style={S.header}>
         <span style={S.logo}>NO GOOD DESIGN CO.</span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {syncStatus && <span style={S.syncBadge}>{syncStatus}</span>}
+          {syncStatus
+            ? <span style={S.syncBadge}>{syncStatus}</span>
+            : syncConfigured && syncError
+              ? <span style={S.syncBadge}>{unsentCount > 0 ? "offline \u00b7 " + unsentCount : "offline"}</span>
+              : null}
           {boughtCount > 0 && <span style={S.headerStat}>{boughtCount} sold · ${totalRevenue}</span>}
           <button style={S.gearBtn} onClick={() => setShowSettings(true)}><GearIcon /></button>
         </div>
@@ -650,20 +848,20 @@ export default function App() {
           </div>
           <div style={S.rule} />
           <div style={S.feed}>
-            {entries.length === 0 && <div style={S.empty}>No one is here yet</div>}
-            {entries.map(entry => (
-              expandedId === entry.id ? (
-                <ExpandedEntry key={entry.id} entry={entry} onUpdate={updateEntry}
-                  onDone={() => saveAndCollapse(entry.id)} onDelete={() => deleteEntry(entry.id)} onPickCatalog={() => setShowCatalogPicker(entry.id)} />
+            {visible.length === 0 && <div style={S.empty}>No one is here yet</div>}
+            {visible.map(entry => (
+              expandedUid === entry.uid ? (
+                <ExpandedEntry key={entry.uid} entry={entry} onUpdate={updateEntry}
+                  onDone={() => saveAndCollapse(entry.uid)} onDelete={() => deleteEntry(entry.uid)} onPickCatalog={() => setShowCatalogPicker(entry.uid)} />
               ) : (
-                <CollapsedEntry key={entry.id} entry={entry} onTap={() => setExpandedId(entry.id)} allSoldIds={allSoldIds} />
+                <CollapsedEntry key={entry.uid} entry={entry} onTap={() => setExpandedUid(entry.uid)} />
               )
             ))}
           </div>
         </div>
       ) : (
         <div style={S.content}>
-          <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} allSoldIds={allSoldIds} />
+          <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} soldOutIds={soldOutIds} />
         </div>
       )}
 
@@ -719,7 +917,7 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
       </div>
       <div style={S.pillRow}>
         {ENGAGEMENTS.map(eng => (
-          <button key={eng} onClick={() => onUpdate(entry.id, "engage", eng)}
+          <button key={eng} onClick={() => onUpdate(entry.uid, "engage", eng)}
             style={entry.engage === eng ? S.pillActive : S.pill}>
             {eng}
           </button>
@@ -731,7 +929,7 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
             <div style={S.saleRow}>
               <span style={S.dollar}>$</span>
               <input style={S.saleInput} type="number" inputMode="decimal" value={entry.amount}
-                onChange={e => onUpdate(entry.id, "amount", e.target.value)} placeholder="0" autoFocus />
+                onChange={e => onUpdate(entry.uid, "amount", e.target.value)} placeholder="0" />
             </div>
             {soldItems.length === 0 ? (
               <button style={S.catalogPickBtn} onClick={onPickCatalog}>Select items from catalog</button>
@@ -749,30 +947,30 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
                       {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : null}
                     </div>
                     <span style={S.soldName}>{item.name}</span>
-                    <span style={S.soldPrice}>${item.price}</span>
+                    <span style={S.soldPrice}>{item.price != null ? `$${item.price}` : "—"}</span>
                   </div>
                 ))}
               </div>
             )}
             <input style={S.saleItemInput} value={entry.items}
-              onChange={e => onUpdate(entry.id, "items", e.target.value)}
+              onChange={e => onUpdate(entry.uid, "items", e.target.value)}
               placeholder='or type freehand — "bag + 2 charms"' />
           </div>
           <div style={S.payBox}>
             {["Venmo", "Zelle", "Cash"].map(m => (
-              <button key={m} onClick={() => onUpdate(entry.id, "payment", m)}
+              <button key={m} onClick={() => onUpdate(entry.uid, "payment", m)}
                 style={entry.payment === m ? S.payActive : S.payBtn}>{m}</button>
             ))}
           </div>
         </>
       )}
       <input style={S.noteInput} value={entry.note}
-        onChange={e => onUpdate(entry.id, "note", e.target.value)} placeholder="note (optional)" />
+        onChange={e => onUpdate(entry.uid, "note", e.target.value)} placeholder="note (optional)" />
     </div>
   );
 }
 
-function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, allSoldIds }) {
+function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldOutIds }) {
   const ref = useRef(null);
   return (
     <div style={S.priceWrap}>
@@ -795,7 +993,7 @@ function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, allSo
             <div style={S.catHeader}>{cat}</div>
             <div style={S.rule} />
             {items.map(item => {
-              const sold = allSoldIds.has(item.id);
+              const sold = soldOutIds.has(item.id);
               return (
                 <div key={item.id} style={S.catItem}>
                   <div style={S.thumb}>
