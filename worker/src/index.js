@@ -40,11 +40,21 @@ function fail(message, status = 400) {
 
 /** The app stores an entry as a flat object. These are the fields the server
  *  needs to reason about; everything else rides along untouched in `body`. */
-function normalise(raw) {
+// Conflicts resolve on the timestamp the device wrote, which is only safe while
+// the devices roughly agree about the time. A phone whose clock runs fast would
+// otherwise win every conflict forever, silently swallowing the other phone's
+// edits, so anything claiming to be from the future is pulled back to now.
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+function normalise(raw, nowMs) {
   if (!raw || typeof raw !== "object") return null;
   const uid = typeof raw.uid === "string" ? raw.uid.trim() : "";
   if (!uid || uid.length > 128) return null;
-  const updatedAt = typeof raw.ts === "string" && raw.ts ? raw.ts : new Date(0).toISOString();
+  let updatedAt = typeof raw.ts === "string" && raw.ts ? raw.ts : new Date(0).toISOString();
+  const claimed = Date.parse(updatedAt);
+  if (!Number.isFinite(claimed) || claimed > nowMs + MAX_CLOCK_SKEW_MS) {
+    updatedAt = new Date(nowMs).toISOString();
+  }
   return {
     uid,
     deviceId: typeof raw.deviceId === "string" ? raw.deviceId.slice(0, 64) : "",
@@ -52,7 +62,7 @@ function normalise(raw) {
     updatedAt,
     deletedAt: typeof raw.deletedAt === "string" && raw.deletedAt ? raw.deletedAt : null,
     seqHint: Number.isInteger(raw.id) ? raw.id : null,
-    body: raw,
+    body: { ...raw, ts: updatedAt },
   };
 }
 
@@ -184,8 +194,9 @@ export default {
         try { payload = await request.json(); }
         catch { return fail("body must be JSON"); }
 
+        const now = Date.now();
         const incoming = Array.isArray(payload?.rows)
-          ? payload.rows.map(normalise).filter(Boolean)
+          ? payload.rows.map(r => normalise(r, now)).filter(Boolean)
           : [];
         if (incoming.length > MAX_ROWS) return fail(`at most ${MAX_ROWS} rows per push`, 413);
 
