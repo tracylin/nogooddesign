@@ -1,6 +1,8 @@
 // Keeps the app openable with no signal. A market building is exactly where a
 // force-close and reopen would otherwise give you a blank screen.
-const SHELL = "ngd-shell-v1";
+// Bump this whenever the shell changes in a way phones should not keep a stale
+// copy of. Activating drops every older cache.
+const SHELL = "ngd-shell-v2";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
