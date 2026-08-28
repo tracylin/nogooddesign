@@ -112,7 +112,21 @@ check("its numbering restarts at 1", otherDay.rows[0].id === 1, otherDay.rows[0]
 const today = (await pull(DAY, 0)).body;
 check("today is unaffected", !today.rows.some(r => r.uid === "next1"));
 
-console.log("\n10. Bad requests are refused");
+console.log("\n10. A phone with a badly set clock cannot win forever");
+// Conflicts resolve on the timestamp the device wrote. Without a clamp, a phone
+// running an hour fast would beat every later edit from the other phone.
+const FUTURE = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+await push(DAY, 0, [entry("skew1", "fastphone", { ts: FUTURE, note: "from the future" })]);
+const stored = (await pull(DAY, 0)).body.rows.find(r => r.uid === "skew1");
+check("the future timestamp was pulled back to now", stored.ts < FUTURE, stored.ts);
+check("the entry itself is kept", stored.note === "from the future", stored.note);
+
+const soon = new Date(Date.now() + 1000).toISOString();
+await push(DAY, 0, [entry("skew1", "goodphone", { ts: soon, note: "a normal later edit" })]);
+const after = (await pull(DAY, 0)).body.rows.find(r => r.uid === "skew1");
+check("a normal later edit still wins", after.note === "a normal later edit", after.note);
+
+console.log("\n11. Bad requests are refused");
 const shortKey = await fetch(`${BASE}/sync?stall=short&market=${DAY}&since=0`);
 check("a guessable stall key is rejected", shortKey.status === 400, shortKey.status);
 const noMarket = await fetch(`${BASE}/sync?stall=${STALL}&since=0`);
