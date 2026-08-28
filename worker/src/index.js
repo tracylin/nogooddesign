@@ -77,6 +77,51 @@ function normalise(raw, nowMs) {
   };
 }
 
+// Two people editing one customer are usually editing different things: she
+// marks the sale, he writes the note. Keeping only the newer of the two whole
+// entries throws one of those away, which is how a recorded sale can vanish
+// while nobody does anything wrong. So each field carries its own timestamp and
+// is merged on its own.
+const MERGEABLE = [
+  "time", "engage", "amount", "amountManual", "payment",
+  "items", "soldCatalogIds", "soldItemNames", "note",
+];
+
+function stampFor(stamps, field, fallback) {
+  const t = stamps && typeof stamps[field] === "string" ? stamps[field] : null;
+  return t || fallback;
+}
+
+function mergeBodies(stored, storedStamps, storedUpdated, incoming, incomingStamps, incomingUpdated) {
+  const body = { ...stored };
+  const stamps = {};
+  for (const field of MERGEABLE) {
+    const mine = stampFor(storedStamps, field, storedUpdated);
+    const theirs = stampFor(incomingStamps, field, incomingUpdated);
+    if (field in incoming && theirs > mine) {
+      body[field] = incoming[field];
+      stamps[field] = theirs;
+    } else {
+      stamps[field] = mine;
+    }
+  }
+  return { body, stamps };
+}
+
+// Deletion is its own field, and it wins a tie: if the two sides are the same
+// age and one of them is a deletion, the entry stays deleted.
+function resolveDeletion(stored, storedStamps, storedUpdated, incoming, incomingStamps, incomingUpdated, trusted) {
+  const mine = stampFor(storedStamps, "deletedAt", storedUpdated);
+  const theirs = stampFor(incomingStamps, "deletedAt", incomingUpdated);
+  const storedDeleted = stored.deletedAt || null;
+  const incomingDeleted = incoming.deletedAt || null;
+  // A timestamp we had to clamp may never bring a deleted entry back.
+  if (!trusted && storedDeleted && !incomingDeleted) return { deletedAt: storedDeleted, stamp: mine };
+  if (theirs > mine) return { deletedAt: incomingDeleted, stamp: theirs };
+  if (theirs === mine && incomingDeleted && !storedDeleted) return { deletedAt: incomingDeleted, stamp: theirs };
+  return { deletedAt: storedDeleted, stamp: mine };
+}
+
 /** Rows go back to the app in exactly the shape it stores them, with the
  *  server's display number and deletion state applied on top. */
 function toEntry(row) {
