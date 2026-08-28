@@ -879,7 +879,7 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
       </div>
       <div style={S.pillRow}>
         {ENGAGEMENTS.map(eng => (
-          <button key={eng} onClick={() => onUpdate(entry.id, "engage", eng)}
+          <button key={eng} onClick={() => onUpdate(entry.uid, "engage", eng)}
             style={entry.engage === eng ? S.pillActive : S.pill}>
             {eng}
           </button>
@@ -891,7 +891,7 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
             <div style={S.saleRow}>
               <span style={S.dollar}>$</span>
               <input style={S.saleInput} type="number" inputMode="decimal" value={entry.amount}
-                onChange={e => onUpdate(entry.id, "amount", e.target.value)} placeholder="0" />
+                onChange={e => onUpdate(entry.uid, "amount", e.target.value)} placeholder="0" />
             </div>
             {soldItems.length === 0 ? (
               <button style={S.catalogPickBtn} onClick={onPickCatalog}>Select items from catalog</button>
@@ -915,19 +915,19 @@ function ExpandedEntry({ entry, onUpdate, onDone, onDelete, onPickCatalog }) {
               </div>
             )}
             <input style={S.saleItemInput} value={entry.items}
-              onChange={e => onUpdate(entry.id, "items", e.target.value)}
+              onChange={e => onUpdate(entry.uid, "items", e.target.value)}
               placeholder='or type freehand — "bag + 2 charms"' />
           </div>
           <div style={S.payBox}>
             {["Venmo", "Zelle", "Cash"].map(m => (
-              <button key={m} onClick={() => onUpdate(entry.id, "payment", m)}
+              <button key={m} onClick={() => onUpdate(entry.uid, "payment", m)}
                 style={entry.payment === m ? S.payActive : S.payBtn}>{m}</button>
             ))}
           </div>
         </>
       )}
       <input style={S.noteInput} value={entry.note}
-        onChange={e => onUpdate(entry.id, "note", e.target.value)} placeholder="note (optional)" />
+        onChange={e => onUpdate(entry.uid, "note", e.target.value)} placeholder="note (optional)" />
     </div>
   );
 }
