@@ -162,7 +162,7 @@ function ensureSchema(db) {
 
 async function changesSince(db, stall, market, since) {
   const { results } = await db
-    .prepare("SELECT uid, seq, deleted_at, updated_at, rev, body FROM entries " +
+    .prepare("SELECT uid, seq, deleted_at, updated_at, rev, body, field_ts FROM entries " +
              "WHERE stall = ? AND market = ? AND rev > ? ORDER BY rev ASC LIMIT 2000")
     .bind(stall, market, since)
     .all();
@@ -247,6 +247,50 @@ async function applyRows(db, stall, market, incoming, attempt = 0) {
     return changes === 0;
   });
   if (lost.length && attempt < 3) return applyRows(db, stall, market, lost, attempt + 1);
+}
+
+function csvCell(value) {
+  const text = value == null ? "" : String(value);
+  return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+const EXPORT_COLUMNS = [
+  ["number", e => e.id],
+  ["time", e => e.time],
+  ["engagement", e => e.engage],
+  ["amount", e => e.amount],
+  ["payment", e => e.payment],
+  ["items sold", e => e.soldItemNames || (e.soldCatalogIds || []).join(" ")],
+  ["items typed", e => e.items],
+  ["note", e => e.note],
+  ["phone", e => e.deviceId],
+  ["created", e => e.createdAt],
+  ["last edited", e => e.ts],
+  ["deleted", e => e.deletedAt || ""],
+];
+
+async function marketsFor(db, stall) {
+  const { results } = await db
+    .prepare(
+      "SELECT market, " +
+      "  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS entries, " +
+      "  MAX(updated_at) AS last_activity " +
+      "FROM entries WHERE stall = ? GROUP BY market ORDER BY market DESC LIMIT 400")
+    .bind(stall)
+    .all();
+  return results || [];
+}
+
+async function rowsFor(db, stall, market, includeDeleted) {
+  const { results } = await db
+    .prepare(
+      "SELECT uid, seq, deleted_at, updated_at, body, field_ts FROM entries " +
+      "WHERE stall = ? AND market = ? " +
+      (includeDeleted ? "" : "AND deleted_at IS NULL ") +
+      "ORDER BY seq ASC")
+    .bind(stall, market)
+    .all();
+  return (results || []).map(toEntry);
 }
 
 export default {
