@@ -40,11 +40,24 @@ function fail(message, status = 400) {
 
 /** The app stores an entry as a flat object. These are the fields the server
  *  needs to reason about; everything else rides along untouched in `body`. */
-function normalise(raw) {
+// Conflicts resolve on the timestamp the device wrote, which is only safe while
+// the devices roughly agree about the time. A phone whose clock runs fast would
+// otherwise win every conflict forever, silently swallowing the other phone's
+// edits, so anything claiming to be from the future is pulled back to now.
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+function normalise(raw, nowMs) {
   if (!raw || typeof raw !== "object") return null;
   const uid = typeof raw.uid === "string" ? raw.uid.trim() : "";
   if (!uid || uid.length > 128) return null;
-  const updatedAt = typeof raw.ts === "string" && raw.ts ? raw.ts : new Date(0).toISOString();
+  let updatedAt = typeof raw.ts === "string" && raw.ts ? raw.ts : new Date(0).toISOString();
+  const claimed = Date.parse(updatedAt);
+  // A clamped row is one whose own idea of the time we do not believe. It is
+  // still stored, but it is never allowed to undo a deletion: bringing back an
+  // entry someone deleted is the worst thing this system can do, and a
+  // timestamp we do not trust is not good enough reason to do it.
+  const trusted = Number.isFinite(claimed) && claimed <= nowMs + MAX_CLOCK_SKEW_MS;
+  if (!trusted) updatedAt = new Date(nowMs).toISOString();
   return {
     uid,
     deviceId: typeof raw.deviceId === "string" ? raw.deviceId.slice(0, 64) : "",
@@ -52,7 +65,8 @@ function normalise(raw) {
     updatedAt,
     deletedAt: typeof raw.deletedAt === "string" && raw.deletedAt ? raw.deletedAt : null,
     seqHint: Number.isInteger(raw.id) ? raw.id : null,
-    body: raw,
+    trusted,
+    body: { ...raw, ts: updatedAt },
   };
 }
 
@@ -138,9 +152,13 @@ async function applyRows(db, stall, market, incoming) {
         "  body       = excluded.body " +
         // Last write wins, and a deletion wins a tie. Anything older than what
         // is already stored is ignored rather than overwriting it.
-        "WHERE excluded.updated_at > entries.updated_at " +
+        "WHERE (excluded.updated_at > entries.updated_at " +
         "   OR (excluded.updated_at = entries.updated_at " +
-        "       AND excluded.deleted_at IS NOT NULL AND entries.deleted_at IS NULL)"
+        "       AND excluded.deleted_at IS NOT NULL AND entries.deleted_at IS NULL))" +
+        // A row whose timestamp we had to clamp may not bring a deleted entry
+        // back to life.
+        (r.trusted ? "" :
+        "   AND NOT (entries.deleted_at IS NOT NULL AND excluded.deleted_at IS NULL)")
       )
       .bind(stall, market, r.uid, isNew ? seq : (r.seqHint ?? 0), r.deviceId,
             r.createdAt, r.updatedAt, r.deletedAt, rev, JSON.stringify(r.body));
@@ -184,8 +202,9 @@ export default {
         try { payload = await request.json(); }
         catch { return fail("body must be JSON"); }
 
+        const now = Date.now();
         const incoming = Array.isArray(payload?.rows)
-          ? payload.rows.map(normalise).filter(Boolean)
+          ? payload.rows.map(r => normalise(r, now)).filter(Boolean)
           : [];
         if (incoming.length > MAX_ROWS) return fail(`at most ${MAX_ROWS} rows per push`, 413);
 

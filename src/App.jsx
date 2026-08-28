@@ -190,6 +190,20 @@ function withIdentity(e) {
 // Polling only runs while the app is on screen, so this costs less than the old
 // 20s timer that ran regardless.
 const SYNC_INTERVAL = 4000;
+// Mobile networks routinely accept a connection and then never answer. Without
+// a deadline such a request hangs forever, and because only one sync runs at a
+// time that wedges syncing until the app is restarted, which is exactly what it
+// looked like from the stall.
+const SYNC_TIMEOUT = 12000;
+
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
 const BASE_URL = "https://script.google.com/macros/s/";
 function buildUrl(deployId) { return deployId ? BASE_URL + deployId + "/exec" : ""; }
 
@@ -289,6 +303,9 @@ async function pushLog(deployId, entry, action) {
     if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
     return { ok: true };
   } catch (e) {
+    if (e.name === "TimeoutError" || e.name === "AbortError") {
+      return { ok: false, error: "sync timed out" };
+    }
     return { ok: false, error: e.message || "no connection" };
   }
 }
@@ -333,8 +350,9 @@ async function syncWithWorker({ url, stall, market, since, rows }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ rows }),
+          signal: timeoutSignal(SYNC_TIMEOUT),
         })
-      : await fetch(endpoint);
+      : await fetch(endpoint, { signal: timeoutSignal(SYNC_TIMEOUT) });
     if (!res.ok) {
       let message = "sync returned " + res.status;
       try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep the status */ }
@@ -503,39 +521,49 @@ export default function App() {
     syncing.current = true;
     if (manual) setSyncStatus("syncing…");
 
-    const queued = dirtyRef.current;
-    const outgoing = entriesRef.current.filter(e => queued.has(e.uid));
-    const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
+    try {
+      const queued = dirtyRef.current;
+      const outgoing = entriesRef.current.filter(e => queued.has(e.uid));
+      const sentAt = new Map(outgoing.map(e => [e.uid, e.ts]));
 
-    let since = 0;
-    try { since = parseInt(localStorage.getItem(cursorKey(stall, day)) || "0", 10) || 0; } catch { /* storage unavailable, carry on */ }
+      let since = 0;
+      try { since = parseInt(localStorage.getItem(cursorKey(stall, day)) || "0", 10) || 0; } catch { /* storage unavailable, carry on */ }
 
-    const result = await syncWithWorker({ url, stall, market: day, since, rows: outgoing });
-    syncing.current = false;
+      const result = await syncWithWorker({ url, stall, market: day, since, rows: outgoing });
 
-    if (!result.ok) {
-      setSyncError(result.error);
-      setSyncStatus("");
-      return;
-    }
+      if (!result.ok) {
+        setSyncError(result.error);
+        setSyncStatus("");
+        return;
+      }
 
-    try { localStorage.setItem(cursorKey(stall, day), String(result.cursor)); } catch { /* storage unavailable, carry on */ }
-    if (result.rows.length) setEntries(prev => pruneTombstones(mergeFromServer(prev, result.rows)));
+      try { localStorage.setItem(cursorKey(stall, day), String(result.cursor)); } catch { /* storage unavailable, carry on */ }
+      if (result.rows.length) setEntries(prev => pruneTombstones(mergeFromServer(prev, result.rows)));
 
-    // Only clear what was actually sent, and only if it has not been edited again
-    // while the request was in flight.
-    setDirty(prev => {
-      const next = new Set(prev);
-      sentAt.forEach((ts, uid) => {
-        const now = entriesRef.current.find(e => e.uid === uid);
-        if (!now || now.ts === ts) next.delete(uid);
+      // Only clear what was actually sent, and only if it has not been edited
+      // again while the request was in flight.
+      setDirty(prev => {
+        const next = new Set(prev);
+        sentAt.forEach((ts, uid) => {
+          const now = entriesRef.current.find(e => e.uid === uid);
+          if (!now || now.ts === ts) next.delete(uid);
+        });
+        return next;
       });
-      return next;
-    });
 
-    setSyncError("");
-    setSyncStatus("synced");
-    setTimeout(() => setSyncStatus(s => (s === "synced" ? "" : s)), 1500);
+      setSyncError("");
+      // A badge that reappears every few seconds is noise, so only a sync the
+      // user asked for gets confirmed on screen.
+      if (manual) {
+        setSyncStatus("synced");
+        setTimeout(() => setSyncStatus(t => (t === "synced" ? "" : t)), 1500);
+      } else {
+        setSyncStatus("");
+      }
+    } finally {
+      // Whatever went wrong above, the next sync must be allowed to start.
+      syncing.current = false;
+    }
   }, []);
 
   // Sync while the app is on screen, and the moment it comes back. Phone
@@ -721,6 +749,9 @@ export default function App() {
     if (confirm("Clear this phone's copy? The server keeps everything, and the next sync pulls it back.")) {
       setEntries([]);
       setExpandedUid(null);
+      // Without this the queue keeps uids for entries that no longer exist, and
+      // the "waiting to send" count never comes back down.
+      setDirty(new Set());
       try { localStorage.removeItem(cursorKey(stallKey, market)); } catch { /* storage unavailable, carry on */ }
     }
   };
@@ -850,6 +881,7 @@ export default function App() {
       <div style={S.header}>
         <span style={S.logo}>NO GOOD DESIGN CO.</span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {market !== todayMarket() && <span style={S.dayBadge}>{market}</span>}
           {syncStatus
             ? <span style={S.syncBadge}>{syncStatus}</span>
             : syncConfigured && syncError
@@ -1060,6 +1092,7 @@ const S = {
   logo: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: BK, letterSpacing: "0.12em", textTransform: "uppercase" },
   headerStat: { fontFamily: SANS, fontSize: 11, color: BK },
   syncBadge: { fontSize: 10, color: BK },
+  dayBadge: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "1px 5px", letterSpacing: "0.02em" },
   gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   rule: { height: 1, background: BK, flexShrink: 0 },
   nav: { display: "flex", flexShrink: 0 },
