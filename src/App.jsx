@@ -348,6 +348,34 @@ const EXPORT_COLUMNS = [
   ["last edited", e => e.ts],
 ];
 
+// Accepts our own export files and the older shape that had no uid, so a day
+// saved before any of this existed can still be brought back.
+function normaliseImported(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (!raw.uid && !Number.isInteger(raw.id)) return null;
+  const withUid = withIdentity({
+    engage: "", amount: "", items: "", soldCatalogIds: [], payment: "", note: "", time: "",
+    ...raw,
+  });
+  return {
+    ...withUid,
+    deletedAt: raw.deletedAt || null,
+    createdAt: withUid.createdAt || withUid.ts || new Date().toISOString(),
+    ts: withUid.ts || new Date().toISOString(),
+  };
+}
+
+function readImportFile(text) {
+  const parsed = JSON.parse(text);
+  const rows = Array.isArray(parsed) ? parsed : parsed.entries;
+  if (!Array.isArray(rows)) throw new Error("no entries in that file");
+  const entries = rows.map(normaliseImported).filter(Boolean);
+  if (entries.length === 0) throw new Error("no entries in that file");
+  const market = (!Array.isArray(parsed) && parsed.market) ||
+    (entries[0].createdAt || entries[0].ts || "").slice(0, 10);
+  return { market, entries };
+}
+
 function toCsv(entries) {
   const lines = [EXPORT_COLUMNS.map(c => csvCell(c[0])).join(",")];
   entries.forEach(e => lines.push(EXPORT_COLUMNS.map(c => csvCell(c[1](e))).join(",")));
@@ -527,12 +555,18 @@ export default function App() {
   const [deviceId] = useState(getDeviceId);
   const [history, setHistory] = useState(null);
   const [historyError, setHistoryError] = useState("");
+  // Every day the server holds, so this phone can notice that another one has
+  // already started a new market.
+  const [serverDays, setServerDays] = useState([]);
+  const fileInput = useRef(null);
   const entriesRef = useRef(entries);
   const dirtyRef = useRef(dirty);
+  const unsentCountRef = useRef(0);
   const cfgRef = useRef({ syncUrl, stallKey, market });
   const syncing = useRef(false);
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
+  useEffect(() => { unsentCountRef.current = dirty.size; }, [dirty]);
   useEffect(() => { cfgRef.current = { syncUrl, stallKey, market }; }, [syncUrl, stallKey, market]);
 
   // The stall key is a secret, so it does not stay sitting in the address bar
@@ -759,6 +793,12 @@ export default function App() {
   }, 0);
 
   const unsentCount = dirty.size;
+  // Today wins if the calendar has moved on. Otherwise, if another phone has
+  // already opened a later day, follow that one.
+  const today = todayMarket();
+  const laterOnServer = serverDays.filter(d => d > market).sort().pop();
+  const suggestedDay = today > market ? today : (laterOnServer || null);
+  const suggestedReason = today > market ? "It is a new day" : "Another phone has started";
 
   const exportToSheet = async () => {
     if (!deployId) return;
@@ -774,9 +814,40 @@ export default function App() {
     setTimeout(() => setSyncStatus(""), 2500);
   };
 
+  const downloadTodayJson = () => {
+    const payload = { market, exported: new Date().toISOString(), entries: visible };
+    const ok = downloadFile("nogooddesign-" + market + ".json", JSON.stringify(payload, null, 2), "application/json");
+    setSyncStatus(ok ? "saved" : "save failed");
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
   const exportUrl = (day, format) =>
     syncBase(syncUrl) + "/export?stall=" + encodeURIComponent(stallKey) +
     "&market=" + encodeURIComponent(day) + "&format=" + format;
+
+  const fetchDays = useCallback(async () => {
+    const { syncUrl: url, stallKey: stall } = cfgRef.current;
+    if (!url || !stall) return [];
+    try {
+      const res = await fetch(syncBase(url) + "/markets?stall=" + encodeURIComponent(stall),
+        { signal: timeoutSignal(SYNC_TIMEOUT) });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data.markets) ? data.markets : [];
+    } catch { return []; }
+  }, []);
+
+  // Checked on load and occasionally after, so if the other phone starts a new
+  // market this one offers to follow rather than quietly counting into
+  // yesterday.
+  useEffect(() => {
+    if (!syncConfigured) return;
+    let alive = true;
+    const look = () => fetchDays().then(days => { if (alive) setServerDays(days.map(d => d.market)); });
+    const first = setTimeout(look, 1500);
+    const timer = setInterval(look, 5 * 60 * 1000);
+    return () => { alive = false; clearTimeout(first); clearInterval(timer); };
+  }, [syncConfigured, fetchDays]);
 
   const loadHistory = async () => {
     if (!syncConfigured) return;
@@ -793,6 +864,36 @@ export default function App() {
     }
   };
 
+  const restoreFromFile = async (file) => {
+    if (!file) return;
+    try {
+      const { market: fileMarket, entries: imported } = readImportFile(await file.text());
+      const day = fileMarket || market;
+      const live = imported.filter(e => !e.deletedAt).length;
+      if (!confirm("Bring back " + live + " customers into " + day + "?" +
+        (day !== market ? " This phone will switch to that day." : ""))) return;
+
+      if (day !== market) {
+        setMarket(day);
+        setExpandedUid(null);
+        setHistory(null);
+      }
+      // Imported entries are merged rather than dropped on top, so restoring the
+      // same file twice cannot double anything: they carry stable uids.
+      setEntries(prev => sortEntries(mergeFromServer(prev, imported)));
+      setDirty(prev => {
+        const next = new Set(prev);
+        imported.forEach(e => next.add(e.uid));
+        return next;
+      });
+      setSyncStatus("restored " + live);
+      setTimeout(() => setSyncStatus(""), 3000);
+    } catch (e) {
+      setSyncStatus(e.message === "no entries in that file" ? "nothing to restore" : "could not read that file");
+      setTimeout(() => setSyncStatus(""), 3000);
+    }
+  };
+
   const copySetupLink = async () => {
     const link = buildSetupLink(syncUrl, stallKey, market);
     if (!link) return;
@@ -805,24 +906,28 @@ export default function App() {
     setTimeout(() => setSyncStatus(""), 2500);
   };
 
-  const exportData = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(visible, null, 2));
-      setSyncStatus("copied");
-    } catch {
-      setSyncStatus("copy failed");
+  // Moving to another day is the same operation whether it is a new market or
+  // catching up with the other phone: point at the day, and start empty so the
+  // list is not two markets stacked on top of each other. Nothing is destroyed,
+  // the old day stays on the server.
+  const switchToDay = useCallback((day) => {
+    if (!day || day === market) return;
+    if (unsentCountRef.current > 0 &&
+        !confirm("This phone still has " + unsentCountRef.current + " unsent. Switching to " + day + " leaves them unsent. Continue?")) {
+      return;
     }
-    setTimeout(() => setSyncStatus(""), 2500);
-  };
+    setMarket(day);
+    setEntries([]);
+    setDirty(new Set());
+    setExpandedUid(null);
+    setHistory(null);
+  }, [market]);
 
   const startNewMarket = () => {
     const today = todayMarket();
     if (today === market) return;
-    if (!confirm("Start a new market day (" + today + ")? Today's list clears on this phone. " + market + " stays on the server.")) return;
-    setMarket(today);
-    setEntries([]);
-    setDirty(new Set());
-    setExpandedUid(null);
+    if (!confirm("Start " + today + "? This phone's list clears. " + market + " stays on the server.")) return;
+    switchToDay(today);
   };
 
   const clearData = () => {
@@ -916,8 +1021,11 @@ export default function App() {
             </p>
 
             <label style={S.label}>Market day</label>
-            <input style={S.modalInput} value={market}
-              onChange={e => setMarket(e.target.value.trim())} placeholder="2026-08-28" />
+            <input style={S.modalInput} type="date" value={market}
+              onChange={e => e.target.value && switchToDay(e.target.value)} />
+            <p style={S.hint}>
+              Each market day is counted separately, so days never pile up together.
+            </p>
             {market !== todayMarket() && (
               <button style={S.modalBtn} onClick={startNewMarket}>Start today ({todayMarket()})</button>
             )}
@@ -946,10 +1054,22 @@ export default function App() {
               this service still being here.
             </p>
             <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={downloadToday}>Save today as CSV</button>
-              <button style={S.modalBtn} onClick={exportData}>Copy as JSON</button>
+              <button style={S.modalBtn} onClick={downloadToday}>Save as CSV</button>
+              <button style={S.modalBtn} onClick={downloadTodayJson}>Save as JSON</button>
             </div>
-            <p style={S.hint}>Saving works with no signal. It uses what is on this phone.</p>
+            <p style={S.hint}>
+              Saving works with no signal, from what is on this phone. CSV is for
+              reading, JSON is the one to keep if you might need to put it back.
+            </p>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={() => fileInput.current?.click()}>Restore from file</button>
+            </div>
+            <input ref={fileInput} type="file" accept=".json,application/json" style={{ display: "none" }}
+              onChange={e => { restoreFromFile(e.target.files?.[0]); e.target.value = ""; }} />
+            <p style={S.hint}>
+              Takes a JSON file saved here or downloaded below. Restoring the same
+              file twice cannot duplicate anything.
+            </p>
 
             <div style={S.rule} />
             <label style={S.label}>Past market days</label>
@@ -1012,6 +1132,17 @@ export default function App() {
 
       {tab === "count" ? (
         <div style={S.content}>
+          {suggestedDay && (
+            <div style={S.dayPrompt}>
+              <div style={S.dayPromptText}>
+                <strong style={S.dayPromptStrong}>{suggestedReason}</strong>
+                <span> · counting into {market}</span>
+              </div>
+              <button style={S.dayPromptBtn} onClick={() => switchToDay(suggestedDay)}>
+                Start {suggestedDay}
+              </button>
+            </div>
+          )}
           <div style={S.counterArea}>
             <div style={S.bigNum}>{totalCount}</div>
             <div style={S.btnRow}>
@@ -1209,6 +1340,10 @@ const S = {
   logo: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: BK, letterSpacing: "0.12em", textTransform: "uppercase" },
   headerStat: { fontFamily: SANS, fontSize: 11, color: BK },
   syncBadge: { fontSize: 10, color: BK },
+  dayPrompt: { display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${BK}`, background: "#e3ded4" },
+  dayPromptText: { flex: 1, fontSize: 11.5, fontFamily: SANS, color: BK, lineHeight: 1.35 },
+  dayPromptStrong: { fontWeight: 500 },
+  dayPromptBtn: { fontSize: 11, fontFamily: SANS, color: BG, background: BK, border: "none", padding: "6px 10px", cursor: "pointer", flexShrink: 0 },
   historyList: { maxHeight: 180, overflowY: "auto", marginTop: 8 },
   historyRow: { display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${BK}22` },
   historyDay: { flex: 1, fontSize: 12, fontFamily: SANS, color: BK },
