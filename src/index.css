@@ -3,9 +3,9 @@
   padding: 0;
   box-sizing: border-box;
 }
-body {
-  background: #fff;
-  overflow: hidden;
+html, body {
+  background: #ece8e1;
+  overscroll-behavior: none;
 }
 input[type='number']::-webkit-inner-spin-button {
   -webkit-appearance: none;
