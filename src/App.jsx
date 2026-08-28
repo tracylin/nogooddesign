@@ -1019,6 +1019,7 @@ export default function App() {
               <button style={S.closeBtn} onClick={() => setShowSettings(false)}>✕</button>
             </div>
             <div style={S.rule} />
+            <div style={S.modalBody}>
             <label style={S.label}>Sync address</label>
             <input style={S.modalInput} value={syncUrl} inputMode="url"
               onChange={e => setSyncUrl(e.target.value.trim())}
@@ -1121,6 +1122,7 @@ export default function App() {
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={clearData}>Clear local</button>
+            </div>
             </div>
           </div>
         </div>
@@ -1498,10 +1500,20 @@ const S = {
     position: "fixed", inset: 0, background: BK, display: "flex",
     alignItems: "flex-end", justifyContent: "center", zIndex: 100,
   },
-  modal: { background: BG, borderTop: `1px solid ${BK}`, padding: "20px 20px 32px", width: "100%", maxWidth: 430 },
-  modalHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 },
+  modal: {
+    background: BG, borderTop: `1px solid ${BK}`, width: "100%", maxWidth: 430,
+    maxHeight: "88dvh", display: "flex", flexDirection: "column",
+  },
+  modalBody: {
+    overflowY: "auto", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain",
+    padding: "0 20px 32px", flex: 1,
+  },
+  modalHead: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "20px 20px 14px", flexShrink: 0,
+  },
   modalTitle: { fontFamily: SANS, fontSize: 16, fontWeight: 500, color: BK },
-  closeBtn: { background: "none", border: "none", color: BK, fontSize: 18, cursor: "pointer" },
+  closeBtn: { background: "none", border: "none", color: BK, fontSize: 18, cursor: "pointer", padding: "6px 10px", margin: "-6px -10px" },
   label: { fontSize: 10, color: "#a09a92", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6, marginTop: 14, display: "block" },
   modalInput: {
     width: "100%", background: "transparent", border: `1px solid ${BK}`, color: BK,
