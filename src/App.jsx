@@ -1107,10 +1107,17 @@ export default function App() {
               <div style={S.historyList}>
                 {history.map(day => (
                   <div key={day.market} style={S.historyRow}>
-                    <span style={S.historyDay}>
-                      {day.market}{day.market === market ? " (today)" : ""}
-                    </span>
-                    <span style={S.historyCount}>{day.entries}</span>
+                    {/* Tapping a day is what anyone tries first, so it opens it. */}
+                    <button
+                      style={day.market === market ? S.historyOpenCurrent : S.historyOpen}
+                      onClick={() => { switchToDay(day.market); setShowSettings(false); }}
+                      disabled={day.market === market}
+                    >
+                      <span style={S.historyDay}>{day.market}</span>
+                      <span style={S.historyCount}>
+                        {day.market === market ? "open" : day.entries + (day.entries === 1 ? " entry" : " entries")}
+                      </span>
+                    </button>
                     <a style={S.historyLink} href={exportUrl(day.market, "csv")}
                       target="_blank" rel="noreferrer">CSV</a>
                     <a style={S.historyLink} href={exportUrl(day.market, "json")}
@@ -1118,6 +1125,9 @@ export default function App() {
                   </div>
                 ))}
               </div>
+            )}
+            {history && history.length > 0 && (
+              <p style={S.hint}>Tap a day to look at it. CSV and JSON download it instead.</p>
             )}
 
             <div style={S.rule} />
@@ -1370,8 +1380,18 @@ const S = {
   dayPromptBtn: { fontSize: 11, fontFamily: SANS, color: BG, background: BK, border: "none", padding: "6px 10px", cursor: "pointer", flexShrink: 0 },
   historyList: { maxHeight: 180, overflowY: "auto", marginTop: 8 },
   historyRow: { display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderBottom: `1px solid ${BK}22` },
-  historyDay: { flex: 1, fontSize: 12, fontFamily: SANS, color: BK },
-  historyCount: { fontSize: 11, color: "#a09a92", minWidth: 24, textAlign: "right" },
+  historyOpen: {
+    flex: 1, display: "flex", alignItems: "baseline", gap: 8, minWidth: 0,
+    background: "none", border: "none", padding: "4px 0", margin: 0,
+    cursor: "pointer", textAlign: "left", font: "inherit",
+  },
+  historyOpenCurrent: {
+    flex: 1, display: "flex", alignItems: "baseline", gap: 8, minWidth: 0,
+    background: "none", border: "none", padding: "4px 0", margin: 0,
+    textAlign: "left", font: "inherit", opacity: 0.55,
+  },
+  historyDay: { fontSize: 12, fontFamily: SANS, color: BK, textDecoration: "underline", textUnderlineOffset: 2 },
+  historyCount: { fontSize: 11, color: "#a09a92", whiteSpace: "nowrap" },
   historyLink: { fontSize: 11, color: BK, textDecoration: "underline", padding: "2px 0" },
   dayBadge: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "1px 5px", letterSpacing: "0.02em" },
   gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },

@@ -144,6 +144,23 @@ check("tomorrow holds one", (await rowsFor(TOMORROW)).length === 1, (await rowsF
 check("each day numbers from 1",
   [YESTERDAY, TODAY, TOMORROW].every(async d => (await rowsFor(d))[0].id === 1));
 
+console.log("\n4d. A past day can be opened by tapping it in the list");
+// Downloading a day is not the same as looking at it. Tapping the day is what
+// anyone tries first, so that has to be the thing that opens it.
+await openSettings(B);
+await B.page.getByRole("button", { name: "Show days" }).click();
+await B.page.waitForTimeout(1500);
+const dayButton = B.page.getByRole("button", { name: new RegExp(YESTERDAY) }).first();
+check("the past day is listed as something tappable",
+  await dayButton.isVisible().catch(() => false));
+await dayButton.click();
+caught = await waitFor(B, st => st.market === YESTERDAY && st.live.length === 1, 12000);
+check("tapping it opens that day", caught !== null, caught === null ? await state(B) : caught + "ms");
+check("and the panel gets out of the way",
+  !(await B.page.getByText("Sync address", { exact: false }).first().isVisible().catch(() => false)));
+check("the counter shows that day's customer",
+  await B.page.getByText("#1", { exact: false }).first().isVisible().catch(() => false));
+
 console.log("\n5. An old day can be put back from a file");
 const backup = {
   market: LONG_AGO,
