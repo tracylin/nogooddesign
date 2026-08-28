@@ -131,12 +131,17 @@ check("a normal later edit still wins", after.note === "a normal later edit", af
 
 console.log("\n11. A day can be taken away as a file");
 const csvRes = await fetch(`${BASE}/export?stall=${encodeURIComponent(STALL)}&market=${DAY}&format=csv`);
+// Read the bytes, not text(): decoding to a string strips a leading byte order
+// mark by spec, so checking for it in the decoded text always fails.
+const csvBytes = new Uint8Array(await csvRes.clone().arrayBuffer());
 const csv = await csvRes.text();
 check("the CSV downloads rather than opening in the browser",
   (csvRes.headers.get("content-disposition") || "").includes("attachment"), csvRes.headers.get("content-disposition"));
 check("it is named after the market day",
   (csvRes.headers.get("content-disposition") || "").includes(DAY));
-check("it starts with a byte order mark so Excel reads the names", csv.charCodeAt(0) === 0xfeff);
+check("it starts with a byte order mark so Excel reads the names",
+  csvBytes[0] === 0xef && csvBytes[1] === 0xbb && csvBytes[2] === 0xbf,
+  [csvBytes[0], csvBytes[1], csvBytes[2]]);
 check("it has a header row", csv.split("\r\n")[0].includes("number") && csv.includes("engagement"));
 const csvRows = csv.trim().split("\r\n").length - 1;
 check("every live customer is a row", csvRows > 0, csvRows);
