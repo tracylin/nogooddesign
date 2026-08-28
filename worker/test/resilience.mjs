@@ -82,21 +82,20 @@ check("the customer reaches the other phone", (await waitFor(B, st => st.live.le
   (await state(B)).live.length);
 
 console.log("\n3. Clearing this phone also clears what it was waiting to send");
+B.page.on("dialog", d => d.accept());
 await B.page.route("**/sync**", route => route.abort());
 await B.page.getByRole("button", { name: "✲" }).click();
 await B.page.getByRole("button", { name: "done" }).click();
 await B.page.waitForTimeout(1500);
 check("something is queued", (await state(B)).unsent >= 1, (await state(B)).unsent);
-B.page.once("dialog", d => d.accept());
-await B.page.getByRole("button", { name: "" }).first().click().catch(() => {});
+
+// The gear is the only button on the page whose label is an icon.
 await B.page.evaluate(() => {
   const gear = [...document.querySelectorAll("button")].find(b => b.querySelector("svg"));
-  if (gear) gear.click();
+  gear?.click();
 });
-await B.page.waitForTimeout(300);
-B.page.once("dialog", d => d.accept());
 await B.page.getByRole("button", { name: "Clear local" }).click();
-await B.page.waitForTimeout(600);
+await B.page.waitForTimeout(800);
 s = await state(B);
 check("the list is empty", s.live.length === 0, s.live.length);
 check("and nothing is left waiting to send", s.unsent === 0, s.unsent);
