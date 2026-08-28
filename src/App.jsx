@@ -238,23 +238,42 @@ function enrich(entries) {
 // Every network call reports what actually happened. The old code used
 // mode: "no-cors", which made a rejected write look exactly like a successful
 // one, so nothing could ever be retried.
-async function pushState(deployId, entries) {
-  const url = buildUrl(deployId);
-  if (!url) return { ok: false, error: "no sheet connected" };
+//
+// Some Apps Script deployments do not return readable CORS headers on POST. If
+// that happens the request still reaches the script, so rather than calling it a
+// failure we send it again in the old opaque mode and say plainly that the write
+// could not be confirmed. setState always sends the full state, so sending it
+// twice changes nothing.
+async function postState(url, payload) {
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({
-        action: "setState",
-        state: { entries: enrich(entries), lastModified: new Date().toISOString() },
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message || "no connection" };
+    return { ok: true, confirmed: true };
+  } catch {
+    try {
+      await fetch(url, {
+        method: "POST", mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload),
+      });
+      return { ok: true, confirmed: false };
+    } catch (e) {
+      return { ok: false, error: e.message || "no connection" };
+    }
   }
+}
+
+async function pushState(deployId, entries) {
+  const url = buildUrl(deployId);
+  if (!url) return { ok: false, error: "no sheet connected" };
+  return postState(url, {
+    action: "setState",
+    state: { entries: enrich(entries), lastModified: new Date().toISOString() },
+  });
 }
 
 async function pushLog(deployId, entry, action) {
@@ -398,8 +417,9 @@ export default function App() {
     syncing.current = false;
     if (pushed.ok) {
       setSyncError("");
-      setSyncStatus("synced");
-      setTimeout(() => setSyncStatus(s => (s === "synced" ? "" : s)), 2000);
+      const label = pushed.confirmed ? "synced" : "sent";
+      setSyncStatus(label);
+      setTimeout(() => setSyncStatus(s => (s === label ? "" : s)), 2000);
     } else {
       setSyncError(pushed.error);
       setSyncStatus("offline");
