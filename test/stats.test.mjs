@@ -137,16 +137,24 @@ const fixture = join(here, "fixtures", "march-day.json");
 if (existsSync(fixture)) {
   const rows = JSON.parse(readFileSync(fixture, "utf8"));
   const m = computeStats(rows, []);
-  check("89 people", m.people === 89, m.people);
-  check("10 sales", m.sales === 10, m.sales);
-  check("$241 taken", m.revenue === 241, m.revenue);
-  check("$24.10 a sale", m.averageSale === 24.1, m.averageSale);
-  check("11.2% conversion", (m.conversion * 100).toFixed(1) === "11.2", m.conversion);
-  check("the funnel opens at 85", m.funnel[0].count === 85, m.funnel);
+  check("100 people", m.people === 100, m.people);
+  check("12 sales", m.sales === 12, m.sales);
+  check("$291 taken", m.revenue === 291, m.revenue);
+  check("$24.25 a sale", m.averageSale === 24.25, m.averageSale);
+  check("12% conversion", (m.conversion * 100).toFixed(1) === "12.0", m.conversion);
+  check("the funnel opens at 96", m.funnel[0].count === 96, m.funnel);
   check("four rows never got a stage", m.unmarked === 4, m.unmarked);
   check("the day ran 9am to 3pm", m.hours.length === 7, m.hours.map(h => h.label));
-  check("every sale landed between noon and 2pm",
-    m.hours.filter(h => h.sales > 0).map(h => h.label).join() === "12pm,1pm", m.hours.map(h => h.label + ":" + h.sales));
+  check("the selling ran from 10am to 2pm",
+    m.hours.filter(h => h.sales > 0).map(h => h.label).join() === "10am,12pm,1pm,2pm", m.hours.map(h => h.label + ":" + h.sales));
+  check("half the day's sales fell in the noon hour and the one after",
+    m.hours.filter(h => ["12pm", "1pm"].includes(h.label)).reduce((t, h) => t + h.sales, 0) === 10, m.hours.map(h => h.label + ":" + h.sales));
+  check("the shop's own end of day agrees on the split",
+    m.stages.Stopped === 32 && m.stages.Touched === 50 && m.stages.Asked === 2 && m.stages.Bought === 12, m.stages);
+  check("Venmo three, cash one, the rest not written down",
+    m.payments.find(p => p.label === "Venmo")?.count === 3 &&
+    m.payments.find(p => p.label === "Cash")?.count === 1 &&
+    m.payments.find(p => p.label === "not recorded")?.count === 8, m.payments);
   check("profit is unknown until the inventory carries costs", m.profit.known === 0, m.profit);
 } else {
   console.log("  skip fixture, test/fixtures/march-day.json not present");
