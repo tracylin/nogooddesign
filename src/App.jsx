@@ -404,6 +404,23 @@ function loadMarket() {
   return loadStr("ngd_market") || todayMarket();
 }
 
+// Setting up the second phone by typing a twenty character key on a phone
+// keyboard is miserable, so the settings screen can hand over a link that
+// carries the whole configuration instead.
+function setupParams() {
+  try { return new URLSearchParams(window.location.search); } catch { return new URLSearchParams(); }
+}
+
+function buildSetupLink(syncUrl, stallKey, market) {
+  try {
+    const u = new URL(window.location.href);
+    u.search = "";
+    u.hash = "";
+    const q = new URLSearchParams({ sync: syncUrl, stall: stallKey, market });
+    return u.toString() + "?" + q.toString();
+  } catch { return ""; }
+}
+
 // Entries changed here but not yet accepted by the server.
 function loadDirty() {
   try {
@@ -431,9 +448,9 @@ export default function App() {
   const [syncError, setSyncError] = useState("");
 
   // Worker sync
-  const [syncUrl, setSyncUrl] = useState(() => loadStr("ngd_sync_url"));
-  const [stallKey, setStallKey] = useState(loadStallKey);
-  const [market, setMarket] = useState(loadMarket);
+  const [syncUrl, setSyncUrl] = useState(() => setupParams().get("sync") || loadStr("ngd_sync_url"));
+  const [stallKey, setStallKey] = useState(() => setupParams().get("stall") || loadStallKey());
+  const [market, setMarket] = useState(() => setupParams().get("market") || loadMarket());
   const [dirty, setDirty] = useState(loadDirty);
 
   // The Google Sheet is now an export, not the database
@@ -447,6 +464,13 @@ export default function App() {
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { cfgRef.current = { syncUrl, stallKey, market }; }, [syncUrl, stallKey, market]);
+
+  // The stall key is a secret, so it does not stay sitting in the address bar
+  // where it would end up in history and in screenshots.
+  useEffect(() => {
+    if (!window.location.search) return;
+    try { window.history.replaceState({}, "", window.location.pathname); } catch { /* history unavailable, carry on */ }
+  }, []);
 
   // ── save ──
   useEffect(() => {
@@ -637,6 +661,18 @@ export default function App() {
     setTimeout(() => setSyncStatus(""), 2500);
   };
 
+  const copySetupLink = async () => {
+    const link = buildSetupLink(syncUrl, stallKey, market);
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      setSyncStatus("link copied");
+    } catch {
+      setSyncStatus("copy failed");
+    }
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
   const exportData = async () => {
     try {
       await navigator.clipboard.writeText(JSON.stringify(visible, null, 2));
@@ -764,7 +800,9 @@ export default function App() {
             <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={() => { runSync(true); setShowSettings(false); }}>Sync now</button>
+              <button style={S.modalBtn} onClick={copySetupLink} disabled={!syncConfigured}>Copy setup link</button>
             </div>
+            <p style={S.hint}>Send the setup link to the other phone and open it there. It carries the address, the key and the day.</p>
 
             <div style={S.rule} />
             <label style={S.label}>Google Sheet export (optional)</label>
