@@ -70,10 +70,13 @@ function normalise(raw, nowMs) {
     createdAt: typeof raw.createdAt === "string" ? raw.createdAt : updatedAt,
     updatedAt,
     deletedAt: typeof raw.deletedAt === "string" && raw.deletedAt ? raw.deletedAt : null,
-    seqHint: Number.isInteger(raw.id) ? raw.id : null,
+    seqHint: Number.isInteger(raw.id) && raw.id > 0 ? raw.id : null,
+    // Set only by a restore. The flag says the number this row carries is part
+    // of the record and must survive; it is not stored on the row itself.
+    keepNumber: raw.keepNumber === true,
     trusted,
     stamps: (raw.fieldTs && typeof raw.fieldTs === "object" && !Array.isArray(raw.fieldTs)) ? raw.fieldTs : {},
-    body: { ...raw, ts: updatedAt },
+    body: (() => { const b = { ...raw, ts: updatedAt }; delete b.keepNumber; return b; })(),
   };
 }
 
@@ -176,6 +179,7 @@ async function changesSince(db, stall, market, since) {
 // write, so each update is guarded on the revision it was read at and anything
 // that loses the race is simply retried against the newer version.
 async function applyRows(db, stall, market, incoming, attempt = 0) {
+
   const placeholders = incoming.map(() => "?").join(",");
   const { results: existingRows } = await db
     .prepare("SELECT uid, seq, rev, updated_at, deleted_at, body, field_ts FROM entries " +
@@ -193,32 +197,46 @@ async function applyRows(db, stall, market, incoming, attempt = 0) {
 
   const fresh = incoming.filter(r => !existing.has(r.uid));
 
+  // A restore brings back a day that already had customer numbers, and those
+  // numbers are part of the record: the note in the shop's spreadsheet says
+  // customer 84, so after a restore it has to still be customer 84. Ordinary
+  // syncing never trusts the number a phone offers, because two phones offline
+  // at the same time both believe their next customer is number 12.
+  const keep = new Map();
+  incoming.forEach(r => { if (r.keepNumber && r.seqHint !== null) keep.set(r.uid, r.seqHint); });
+  const counted = fresh.filter(r => !keep.has(r.uid)).length;
+  const highest = keep.size ? Math.max(...keep.values()) : 0;
+
   // Reserve a block of revisions and display numbers in one statement, so two
-  // phones pushing at the same moment cannot be handed the same values.
+  // phones pushing at the same moment cannot be handed the same values. The
+  // counter is also pulled up past any number a restore brought back, so a
+  // customer arriving afterwards cannot be handed one of them a second time.
   await db.prepare("INSERT OR IGNORE INTO counters (stall, market) VALUES (?, ?)")
           .bind(stall, market).run();
   const reserved = await db
-    .prepare("UPDATE counters SET rev = rev + ?, seq = seq + ? WHERE stall = ? AND market = ? " +
+    .prepare("UPDATE counters SET rev = rev + ?, seq = MAX(seq, ?) + ? WHERE stall = ? AND market = ? " +
              "RETURNING rev, seq")
-    .bind(incoming.length, fresh.length, stall, market)
+    .bind(incoming.length, highest, counted, stall, market)
     .first();
 
   let rev = reserved.rev - incoming.length;
-  let seq = reserved.seq - fresh.length;
+  let seq = reserved.seq - counted;
 
   const statements = incoming.map(r => {
     rev += 1;
     const cur = existing.get(r.uid);
 
     if (!cur) {
-      seq += 1;
+      let number;
+      if (keep.has(r.uid)) number = keep.get(r.uid);
+      else { seq += 1; number = seq; }
       const stamps = {};
       MERGEABLE.forEach(f => { stamps[f] = stampFor(r.stamps, f, r.updatedAt); });
       stamps.deletedAt = stampFor(r.stamps, "deletedAt", r.updatedAt);
       return db.prepare(
         "INSERT INTO entries (stall, market, uid, seq, device_id, created_at, updated_at, deleted_at, rev, body, field_ts) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (stall, market, uid) DO NOTHING")
-        .bind(stall, market, r.uid, seq, r.deviceId, r.createdAt, r.updatedAt, r.deletedAt, rev,
+        .bind(stall, market, r.uid, number, r.deviceId, r.createdAt, r.updatedAt, r.deletedAt, rev,
               JSON.stringify(r.body), JSON.stringify(stamps));
     }
 
@@ -231,9 +249,10 @@ async function applyRows(db, stall, market, incoming, attempt = 0) {
     const updatedAt = cur.updated_at > r.updatedAt ? cur.updated_at : r.updatedAt;
 
     return db.prepare(
-      "UPDATE entries SET device_id = ?, updated_at = ?, deleted_at = ?, rev = ?, body = ?, field_ts = ? " +
+      "UPDATE entries SET device_id = ?, seq = ?, updated_at = ?, deleted_at = ?, rev = ?, body = ?, field_ts = ? " +
       "WHERE stall = ? AND market = ? AND uid = ? AND rev = ?")
-      .bind(r.deviceId || cur.device_id, updatedAt, deletion.deletedAt, rev,
+      .bind(r.deviceId || cur.device_id, keep.has(r.uid) ? keep.get(r.uid) : cur.seq,
+            updatedAt, deletion.deletedAt, rev,
             JSON.stringify(body), JSON.stringify(merged.stamps),
             stall, market, r.uid, cur.rev);
   });

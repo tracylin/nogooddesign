@@ -171,5 +171,57 @@ check("a malformed body is rejected", badBody.status === 400, badBody.status);
 const notFound = await fetch(`${BASE}/nope`);
 check("unknown paths are refused", notFound.status === 404, notFound.status);
 
+console.log("\n14. A restore brings back the customer numbers, not new ones");
+const RDAY = "2026-10-10";
+// Three customers arrive normally first, so the day already has numbers in use.
+await push(RDAY, 0, [entry("r1", "phoneA"), entry("r2", "phoneA"), entry("r3", "phoneA")]);
+const rBefore = (await pull(RDAY, 0)).body.rows;
+check("the server numbered them 1 to 3",
+  rBefore.map(r => r.id).sort((a, b) => a - b).join() === "1,2,3", rBefore.map(r => r.id));
+
+// A backup of that day, plus two customers that were lost, all carrying the
+// numbers they had when the file was saved.
+const backup = [
+  { ...entry("r9", "phoneA"), id: 9, keepNumber: true },
+  { ...entry("r40", "phoneA"), id: 40, keepNumber: true },
+];
+await push(RDAY, 0, backup);
+const rAfter = (await pull(RDAY, 0)).body.rows;
+const byUid = new Map(rAfter.map(r => [r.uid, r]));
+check("the restored customer keeps number 9", byUid.get("r9")?.id === 9, byUid.get("r9")?.id);
+check("and the other keeps number 40", byUid.get("r40")?.id === 40, byUid.get("r40")?.id);
+check("the customers already here are untouched",
+  [1, 2, 3].every(n => rAfter.some(r => r.id === n)), rAfter.map(r => r.id));
+check("nothing was numbered twice",
+  new Set(rAfter.map(r => r.id)).size === rAfter.length, rAfter.map(r => r.id));
+check("the flag itself is not stored on the customer",
+  rAfter.every(r => !("keepNumber" in r)), Object.keys(byUid.get("r9") || {}));
+
+console.log("\n15. A number brought back by a restore is not handed out again");
+await push(RDAY, 0, [entry("r-next", "phoneB")]);
+const nextRow = (await pull(RDAY, 0)).body.rows.find(r => r.uid === "r-next");
+check("the next customer is numbered past the restored ones", nextRow.id > 40, nextRow.id);
+const all15 = (await pull(RDAY, 0)).body.rows;
+check("every number on the day is still distinct",
+  new Set(all15.map(r => r.id)).size === all15.length, all15.map(r => r.id));
+
+console.log("\n16. Ordinary syncing still ignores the number a phone suggests");
+const ODAY = "2026-10-11";
+// Two phones offline at once both believe their next customer is number 1.
+await push(ODAY, 0, [{ ...entry("o1", "phoneA"), id: 1 }, { ...entry("o2", "phoneB"), id: 1 }]);
+const oRows = (await pull(ODAY, 0)).body.rows;
+check("both customers are kept", oRows.length === 2, oRows.length);
+check("and given different numbers", oRows[0].id !== oRows[1].id, oRows.map(r => r.id));
+
+console.log("\n17. A restore can correct a number that is already wrong");
+const CDAY = "2026-10-12";
+await push(CDAY, 0, [entry("c1", "phoneA")]);
+check("it starts as number 1", (await pull(CDAY, 0)).body.rows[0].id === 1);
+await push(CDAY, 0, [{ ...entry("c1", "phoneA", { note: "same customer", ts: at(5) }), id: 84, keepNumber: true }]);
+const corrected = (await pull(CDAY, 0)).body.rows;
+check("the restore moves it back to 84", corrected[0].id === 84, corrected[0].id);
+check("and it is still the same customer", corrected.length === 1 && corrected[0].uid === "c1", corrected);
+check("with the note that came with it", corrected[0].note === "same customer", corrected[0].note);
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);
