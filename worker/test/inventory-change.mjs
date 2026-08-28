@@ -31,19 +31,19 @@ await page.getByRole("button", { name: "✲" }).click();
 await page.getByRole("button", { name: "Bought" }).click();
 await page.getByRole("button", { name: "Select items from catalog" }).click();
 await page.waitForTimeout(300);
-// The first two catalog items.
-const picked = await page.evaluate(() => {
-  const rows = [...document.querySelectorAll("div")].filter(d => d.querySelector("img") && d.textContent.includes("$"));
-  const names = [];
-  for (const r of rows.slice(0, 2)) { r.click(); names.push(r.textContent); }
-  return names;
-});
+// Two named catalog items, so the test does not depend on row layout.
+const PICKED = ["GENTLE GARGAR", "BLINDNOPLAN 25SS"];
+for (const name of PICKED) {
+  await page.getByText(name, { exact: true }).first().click();
+  await page.waitForTimeout(200);
+}
 await page.getByRole("button", { name: "Done", exact: true }).click();
 await page.getByRole("button", { name: "done", exact: true }).click();
 await page.waitForTimeout(600);
 
 const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("ngd_entries"))[0]);
 check("two items were picked", (saved.soldCatalogIds || []).length === 2, saved.soldCatalogIds);
+check("they are the ones chosen", (saved.soldItems || []).map(i => i.name).sort().join("|") === PICKED.slice().sort().join("|"), (saved.soldItems || []).map(i => i.name));
 check("the sale kept a record of them", Array.isArray(saved.soldItems) && saved.soldItems.length === 2, saved.soldItems);
 check("with their names", (saved.soldItems || []).every(i => i.name && i.name !== i.id), saved.soldItems);
 check("and the price they sold at", (saved.soldItems || []).every(i => "price" in i), saved.soldItems);
