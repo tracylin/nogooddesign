@@ -182,7 +182,9 @@ function makeUid(deviceId) {
 // every device derives the same uid for the same historical entry.
 function withIdentity(e) {
   if (e.uid) return e;
-  return { ...e, uid: "legacy-" + e.id, deviceId: e.deviceId || "legacy", createdAt: e.createdAt || e.ts };
+  const when = e.createdAt || e.ts || new Date(0).toISOString();
+  return { ...e, uid: "legacy-" + e.id, deviceId: e.deviceId || "legacy",
+    createdAt: when, fieldTs: e.fieldTs || stampAll(when) };
 }
 
 // ─── SYNC ENGINE ───
@@ -400,6 +402,58 @@ function downloadFile(name, text, type) {
   } catch { return false; }
 }
 
+// Two people editing one customer are usually editing different things: she
+// marks the sale, he writes the note. Without knowing which field each of them
+// actually touched, the server can only keep the newer whole entry and the
+// other person's work disappears. So every change records its own field.
+const MERGEABLE = [
+  "time", "engage", "amount", "amountManual", "payment",
+  "items", "soldCatalogIds", "soldItemNames", "note",
+];
+
+function stampFor(stamps, field, fallback) {
+  const t = stamps && typeof stamps[field] === "string" ? stamps[field] : null;
+  return t || fallback;
+}
+
+function stampAll(when) {
+  const stamps = {};
+  MERGEABLE.forEach(f => { stamps[f] = when; });
+  stamps.deletedAt = when;
+  return stamps;
+}
+
+// Marks just the fields this change touched, leaving the rest as they were.
+function touch(entry, fields, when) {
+  const base = entry.fieldTs || stampAll(entry.createdAt || entry.ts || when);
+  const next = { ...base };
+  fields.forEach(f => { next[f] = when; });
+  return next;
+}
+
+// The same merge the server does, so an unsent local edit is not thrown away by
+// a version arriving from the other phone.
+function mergeEntryFields(mine, theirs) {
+  const merged = { ...mine };
+  MERGEABLE.forEach(field => {
+    const a = stampFor(mine.fieldTs, field, mine.ts);
+    const b = stampFor(theirs.fieldTs, field, theirs.ts);
+    if (field in theirs && b > a) merged[field] = theirs[field];
+  });
+  const mineDel = stampFor(mine.fieldTs, "deletedAt", mine.ts);
+  const theirsDel = stampFor(theirs.fieldTs, "deletedAt", theirs.ts);
+  if (theirsDel > mineDel || (theirsDel === mineDel && theirs.deletedAt && !mine.deletedAt)) {
+    merged.deletedAt = theirs.deletedAt || null;
+  }
+  const fieldTs = {};
+  [...MERGEABLE, "deletedAt"].forEach(field => {
+    const a = stampFor(mine.fieldTs, field, mine.ts);
+    const b = stampFor(theirs.fieldTs, field, theirs.ts);
+    fieldTs[field] = b > a ? b : a;
+  });
+  return { ...merged, fieldTs, ts: theirs.ts > mine.ts ? theirs.ts : mine.ts };
+}
+
 // The server owns the display number, so whichever side wins on content, the
 // number comes from the server. That is what stops two phones showing #12 twice.
 function mergeFromServer(local, remote) {
@@ -407,8 +461,7 @@ function mergeFromServer(local, remote) {
   remote.forEach(r => {
     const l = byUid.get(r.uid);
     if (!l) { byUid.set(r.uid, r); return; }
-    const winner = (r.ts || "") >= (l.ts || "") ? r : l;
-    byUid.set(r.uid, { ...winner, id: r.id ?? winner.id });
+    byUid.set(r.uid, { ...mergeEntryFields(l, r), id: r.id ?? l.id });
   });
   return sortEntries(Array.from(byUid.values()));
 }
@@ -728,6 +781,7 @@ export default function App() {
       engage: "", amount: "", amountManual: false, items: "", soldCatalogIds: [],
       payment: "", note: "",
       createdAt: now.toISOString(), ts: now.toISOString(), deletedAt: null,
+      fieldTs: stampAll(now.toISOString()),
     };
     setEntries(prev => sortEntries([entry, ...prev]));
     setExpandedUid(entry.uid);
@@ -737,7 +791,8 @@ export default function App() {
 
   const deleteEntry = useCallback((uid) => {
     const stamp = new Date().toISOString();
-    setEntries(prev => prev.map(e => (e.uid === uid ? { ...e, deletedAt: stamp, ts: stamp } : e)));
+    setEntries(prev => prev.map(e =>
+      (e.uid === uid ? { ...e, deletedAt: stamp, ts: stamp, fieldTs: touch(e, ["deletedAt"], stamp) } : e)));
     setExpandedUid(null);
     markDirty(uid);
     const entry = entriesRef.current.find(e => e.uid === uid);
@@ -755,7 +810,9 @@ export default function App() {
   const updateEntry = useCallback((uid, field, value) => {
     setEntries(prev => prev.map(e => {
       if (e.uid !== uid) return e;
-      const patch = { [field]: value, ts: new Date().toISOString() };
+      const now = new Date().toISOString();
+      const touched = field === "amount" ? [field, "amountManual"] : [field];
+      const patch = { [field]: value, ts: now, fieldTs: touch(e, touched, now) };
       if (field === "amount") patch.amountManual = true;
       return { ...e, ...patch };
     }));
@@ -775,11 +832,16 @@ export default function App() {
       const ids = e.soldCatalogIds || [];
       const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
       const sum = next.reduce((t, cid) => { const c = CATALOG.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
+      const now = new Date().toISOString();
+      const touched = e.amountManual
+        ? ["soldCatalogIds", "soldItemNames"]
+        : ["soldCatalogIds", "soldItemNames", "amount"];
       return {
         ...e,
         soldCatalogIds: next,
         amount: e.amountManual ? e.amount : String(sum),
-        ts: new Date().toISOString(),
+        ts: now,
+        fieldTs: touch(e, touched, now),
       };
     }));
     markDirty(uid);

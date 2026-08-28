@@ -72,8 +72,54 @@ function normalise(raw, nowMs) {
     deletedAt: typeof raw.deletedAt === "string" && raw.deletedAt ? raw.deletedAt : null,
     seqHint: Number.isInteger(raw.id) ? raw.id : null,
     trusted,
+    stamps: (raw.fieldTs && typeof raw.fieldTs === "object" && !Array.isArray(raw.fieldTs)) ? raw.fieldTs : {},
     body: { ...raw, ts: updatedAt },
   };
+}
+
+// Two people editing one customer are usually editing different things: she
+// marks the sale, he writes the note. Keeping only the newer of the two whole
+// entries throws one of those away, which is how a recorded sale can vanish
+// while nobody does anything wrong. So each field carries its own timestamp and
+// is merged on its own.
+const MERGEABLE = [
+  "time", "engage", "amount", "amountManual", "payment",
+  "items", "soldCatalogIds", "soldItemNames", "note",
+];
+
+function stampFor(stamps, field, fallback) {
+  const t = stamps && typeof stamps[field] === "string" ? stamps[field] : null;
+  return t || fallback;
+}
+
+function mergeBodies(stored, storedStamps, storedUpdated, incoming, incomingStamps, incomingUpdated) {
+  const body = { ...stored };
+  const stamps = {};
+  for (const field of MERGEABLE) {
+    const mine = stampFor(storedStamps, field, storedUpdated);
+    const theirs = stampFor(incomingStamps, field, incomingUpdated);
+    if (field in incoming && theirs > mine) {
+      body[field] = incoming[field];
+      stamps[field] = theirs;
+    } else {
+      stamps[field] = mine;
+    }
+  }
+  return { body, stamps };
+}
+
+// Deletion is its own field, and it wins a tie: if the two sides are the same
+// age and one of them is a deletion, the entry stays deleted.
+function resolveDeletion(stored, storedStamps, storedUpdated, incoming, incomingStamps, incomingUpdated, trusted) {
+  const mine = stampFor(storedStamps, "deletedAt", storedUpdated);
+  const theirs = stampFor(incomingStamps, "deletedAt", incomingUpdated);
+  const storedDeleted = stored.deletedAt || null;
+  const incomingDeleted = incoming.deletedAt || null;
+  // A timestamp we had to clamp may never bring a deleted entry back.
+  if (!trusted && storedDeleted && !incomingDeleted) return { deletedAt: storedDeleted, stamp: mine };
+  if (theirs > mine) return { deletedAt: incomingDeleted, stamp: theirs };
+  if (theirs === mine && incomingDeleted && !storedDeleted) return { deletedAt: incomingDeleted, stamp: theirs };
+  return { deletedAt: storedDeleted, stamp: mine };
 }
 
 /** Rows go back to the app in exactly the shape it stores them, with the
@@ -81,7 +127,9 @@ function normalise(raw, nowMs) {
 function toEntry(row) {
   let body = {};
   try { body = JSON.parse(row.body); } catch { body = {}; }
-  return { ...body, uid: row.uid, id: row.seq, deletedAt: row.deleted_at, ts: row.updated_at };
+  let stamps = {};
+  try { stamps = row.field_ts ? JSON.parse(row.field_ts) : {}; } catch { stamps = {}; }
+  return { ...body, uid: row.uid, id: row.seq, deletedAt: row.deleted_at, ts: row.updated_at, fieldTs: stamps };
 }
 
 // The tables are created on first use, so a fresh deployment works without
@@ -96,20 +144,25 @@ function ensureSchema(db) {
         " stall TEXT NOT NULL, market TEXT NOT NULL, uid TEXT NOT NULL," +
         " seq INTEGER NOT NULL, device_id TEXT, created_at TEXT," +
         " updated_at TEXT NOT NULL, deleted_at TEXT, rev INTEGER NOT NULL," +
-        " body TEXT NOT NULL, PRIMARY KEY (stall, market, uid))"),
+        " body TEXT NOT NULL, field_ts TEXT, PRIMARY KEY (stall, market, uid))"),
       db.prepare("CREATE INDEX IF NOT EXISTS idx_entries_rev ON entries (stall, market, rev)"),
       db.prepare(
         "CREATE TABLE IF NOT EXISTS counters (" +
         " stall TEXT NOT NULL, market TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0," +
         " seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (stall, market))"),
-    ]).catch(e => { schemaReady = null; throw e; });
+    ])
+      // Tables made before per-field merging need the extra column. SQLite has
+      // no IF NOT EXISTS for a column, so a second run simply errors and that
+      // is fine.
+      .then(() => db.prepare("ALTER TABLE entries ADD COLUMN field_ts TEXT").run().catch(() => {}))
+      .catch(e => { schemaReady = null; throw e; });
   }
   return schemaReady;
 }
 
 async function changesSince(db, stall, market, since) {
   const { results } = await db
-    .prepare("SELECT uid, seq, deleted_at, updated_at, rev, body FROM entries " +
+    .prepare("SELECT uid, seq, deleted_at, updated_at, rev, body, field_ts FROM entries " +
              "WHERE stall = ? AND market = ? AND rev > ? ORDER BY rev ASC LIMIT 2000")
     .bind(stall, market, since)
     .all();
@@ -118,15 +171,26 @@ async function changesSince(db, stall, market, since) {
   return { cursor, rows };
 }
 
-async function applyRows(db, stall, market, incoming) {
-  // Which uids are already here? Only genuinely new entries consume a display
-  // number, otherwise the numbering would grow gaps on every sync.
+// Merging has to happen here rather than in SQL, so an entry is read, merged
+// and written back. Two requests could interleave between the read and the
+// write, so each update is guarded on the revision it was read at and anything
+// that loses the race is simply retried against the newer version.
+async function applyRows(db, stall, market, incoming, attempt = 0) {
   const placeholders = incoming.map(() => "?").join(",");
   const { results: existingRows } = await db
-    .prepare(`SELECT uid FROM entries WHERE stall = ? AND market = ? AND uid IN (${placeholders})`)
+    .prepare("SELECT uid, seq, rev, updated_at, deleted_at, body, field_ts FROM entries " +
+             `WHERE stall = ? AND market = ? AND uid IN (${placeholders})`)
     .bind(stall, market, ...incoming.map(r => r.uid))
     .all();
-  const existing = new Set((existingRows || []).map(r => r.uid));
+
+  const existing = new Map();
+  (existingRows || []).forEach(row => {
+    let body = {}, stamps = {};
+    try { body = JSON.parse(row.body); } catch { body = {}; }
+    try { stamps = row.field_ts ? JSON.parse(row.field_ts) : {}; } catch { stamps = {}; }
+    existing.set(row.uid, { ...row, parsed: body, stamps });
+  });
+
   const fresh = incoming.filter(r => !existing.has(r.uid));
 
   // Reserve a block of revisions and display numbers in one statement, so two
@@ -144,35 +208,45 @@ async function applyRows(db, stall, market, incoming) {
 
   const statements = incoming.map(r => {
     rev += 1;
-    const isNew = !existing.has(r.uid);
-    if (isNew) seq += 1;
-    return db
-      .prepare(
-        "INSERT INTO entries (stall, market, uid, seq, device_id, created_at, updated_at, deleted_at, rev, body) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-        "ON CONFLICT (stall, market, uid) DO UPDATE SET " +
-        "  device_id  = excluded.device_id, " +
-        "  updated_at = excluded.updated_at, " +
-        "  deleted_at = excluded.deleted_at, " +
-        "  rev        = excluded.rev, " +
-        "  body       = excluded.body " +
-        // Last write wins, and a deletion wins a tie. Anything older than what
-        // is already stored is ignored rather than overwriting it.
-        "WHERE (excluded.updated_at > entries.updated_at " +
-        "   OR (excluded.updated_at = entries.updated_at " +
-        "       AND excluded.deleted_at IS NOT NULL AND entries.deleted_at IS NULL))" +
-        // A row whose timestamp we had to clamp may not bring a deleted entry
-        // back to life.
-        (r.trusted ? "" :
-        "   AND NOT (entries.deleted_at IS NOT NULL AND excluded.deleted_at IS NULL)")
-      )
-      .bind(stall, market, r.uid, isNew ? seq : (r.seqHint ?? 0), r.deviceId,
-            r.createdAt, r.updatedAt, r.deletedAt, rev, JSON.stringify(r.body));
+    const cur = existing.get(r.uid);
+
+    if (!cur) {
+      seq += 1;
+      const stamps = {};
+      MERGEABLE.forEach(f => { stamps[f] = stampFor(r.stamps, f, r.updatedAt); });
+      stamps.deletedAt = stampFor(r.stamps, "deletedAt", r.updatedAt);
+      return db.prepare(
+        "INSERT INTO entries (stall, market, uid, seq, device_id, created_at, updated_at, deleted_at, rev, body, field_ts) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (stall, market, uid) DO NOTHING")
+        .bind(stall, market, r.uid, seq, r.deviceId, r.createdAt, r.updatedAt, r.deletedAt, rev,
+              JSON.stringify(r.body), JSON.stringify(stamps));
+    }
+
+    const merged = mergeBodies(cur.parsed, cur.stamps, cur.updated_at, r.body, r.stamps, r.updatedAt);
+    const deletion = resolveDeletion(
+      { ...cur.parsed, deletedAt: cur.deleted_at }, cur.stamps, cur.updated_at,
+      r.body, r.stamps, r.updatedAt, r.trusted);
+    merged.stamps.deletedAt = deletion.stamp;
+    const body = { ...merged.body, deletedAt: deletion.deletedAt };
+    const updatedAt = cur.updated_at > r.updatedAt ? cur.updated_at : r.updatedAt;
+
+    return db.prepare(
+      "UPDATE entries SET device_id = ?, updated_at = ?, deleted_at = ?, rev = ?, body = ?, field_ts = ? " +
+      "WHERE stall = ? AND market = ? AND uid = ? AND rev = ?")
+      .bind(r.deviceId || cur.device_id, updatedAt, deletion.deletedAt, rev,
+            JSON.stringify(body), JSON.stringify(merged.stamps),
+            stall, market, r.uid, cur.rev);
   });
 
-  // batch runs as one transaction, so a partial write cannot leave the table
-  // holding half of a phone's push.
-  if (statements.length) await db.batch(statements);
+  const results = statements.length ? await db.batch(statements) : [];
+
+  // A statement that changed nothing lost a race with another request. Read the
+  // newer version and merge onto that instead.
+  const lost = incoming.filter((r, i) => {
+    const changes = results[i] && results[i].meta ? results[i].meta.changes : 1;
+    return changes === 0;
+  });
+  if (lost.length && attempt < 3) return applyRows(db, stall, market, lost, attempt + 1);
 }
 
 function csvCell(value) {
@@ -210,7 +284,7 @@ async function marketsFor(db, stall) {
 async function rowsFor(db, stall, market, includeDeleted) {
   const { results } = await db
     .prepare(
-      "SELECT uid, seq, deleted_at, updated_at, body FROM entries " +
+      "SELECT uid, seq, deleted_at, updated_at, body, field_ts FROM entries " +
       "WHERE stall = ? AND market = ? " +
       (includeDeleted ? "" : "AND deleted_at IS NULL ") +
       "ORDER BY seq ASC")
