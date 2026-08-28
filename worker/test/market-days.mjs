@@ -19,6 +19,7 @@ const today = new Date();
 const iso = d => d.toISOString().slice(0, 10);
 const TODAY = iso(today);
 const YESTERDAY = iso(new Date(today.getTime() - 864e5));
+const TOMORROW = iso(new Date(today.getTime() + 864e5));
 const LONG_AGO = "2026-03-21";
 
 let pass = 0, fail = 0;
@@ -84,27 +85,53 @@ const listed = await (await fetch(`${WORKER}/markets?stall=${STALL}`)).json();
 check("yesterday is still held on the server",
   listed.markets.some(m => m.market === YESTERDAY && m.entries === 1), listed.markets);
 
-console.log("\n3. The second phone follows rather than counting into the old day");
+console.log("\n3. The second phone catches up rather than counting into the old day");
 const B = await phone("phoneB", YESTERDAY);
 await A.page.getByRole("button", { name: "✲" }).click();
 await A.page.getByRole("button", { name: "done" }).click();
 await A.page.waitForTimeout(1000);
+check("the second phone is told its day is stale",
+  await B.page.getByText("It is a new day", { exact: false }).first().isVisible());
+await B.page.getByRole("button", { name: "Start " + TODAY }).click();
+let caught = await waitFor(B, st => st.market === TODAY && st.live.length === 1);
+check("and picks up today's customer", caught !== null, caught === null ? await state(B) : caught + "ms");
+
+console.log("\n4. One phone opening a later day pulls the other along");
+// Only the server can tell a phone about this: today is not stale, so nothing
+// on the phone itself would ever hint that the market has moved.
+await openSettings(A);
+await A.page.fill('input[type="date"]', TOMORROW);
+await A.page.waitForTimeout(1500);
+check("the first phone moved", (await state(A)).market === TOMORROW, (await state(A)).market);
+await A.page.getByRole("button", { name: "✲" }).click();
+await A.page.getByRole("button", { name: "done" }).click();
+await A.page.waitForTimeout(1200);
 await B.page.reload();
 const noticed = await B.page.getByText("Another phone has started", { exact: false }).first()
-  .waitFor({ timeout: 12000 }).then(() => true).catch(() => false);
-check("it notices the other phone opened a newer day", noticed);
+  .waitFor({ timeout: 15000 }).then(() => true).catch(() => false);
+check("the second phone hears about it from the server", noticed);
 if (noticed) {
-  await B.page.getByRole("button", { name: "Start " + TODAY }).click();
-  const caught = await waitFor(B, st => st.market === TODAY && st.live.length === 2);
-  check("and catches up with today's customers", caught !== null, caught === null ? "did not catch up" : caught + "ms");
+  await B.page.getByRole("button", { name: "Start " + TOMORROW }).click();
+  caught = await waitFor(B, st => st.market === TOMORROW && st.live.length === 1);
+  check("and follows", caught !== null, caught === null ? await state(B) : caught + "ms");
 }
 
-console.log("\n4. Days do not bleed into each other");
-const todayRows = (await (await fetch(`${WORKER}/sync?stall=${STALL}&market=${TODAY}&since=0`)).json()).rows;
-const yesterdayRows = (await (await fetch(`${WORKER}/sync?stall=${STALL}&market=${YESTERDAY}&since=0`)).json()).rows;
-check("today holds only today", todayRows.length === 2, todayRows.length);
-check("yesterday holds only yesterday", yesterdayRows.length === 1, yesterdayRows.length);
-check("numbering restarts each day", todayRows.map(r => r.id).sort().join() === "1,2", todayRows.map(r => r.id));
+console.log("\n4b. Going back to an earlier day still shows it");
+// A stale cursor would make a revisited day come back empty.
+await openSettings(B);
+await B.page.fill('input[type="date"]', TODAY);
+caught = await waitFor(B, st => st.market === TODAY && st.live.length === 1, 12000);
+check("today's customer is still there on return", caught !== null,
+  caught === null ? await state(B) : caught + "ms");
+
+console.log("\n4c. Days do not bleed into each other");
+const rowsFor = async day =>
+  (await (await fetch(`${WORKER}/sync?stall=${STALL}&market=${day}&since=0`)).json()).rows;
+check("yesterday holds one", (await rowsFor(YESTERDAY)).length === 1, (await rowsFor(YESTERDAY)).length);
+check("today holds one", (await rowsFor(TODAY)).length === 1, (await rowsFor(TODAY)).length);
+check("tomorrow holds one", (await rowsFor(TOMORROW)).length === 1, (await rowsFor(TOMORROW)).length);
+check("each day numbers from 1",
+  [YESTERDAY, TODAY, TOMORROW].every(async d => (await rowsFor(d))[0].id === 1));
 
 console.log("\n5. An old day can be put back from a file");
 const backup = {
@@ -123,7 +150,11 @@ await A.page.setInputFiles('input[type="file"]', path);
 const restored = await waitFor(A, st => st.market === LONG_AGO && st.live.length === 2, 12000);
 check("the file is read and the phone moves to that day", restored !== null,
   restored === null ? await state(A) : restored + "ms");
-check("both customers came back", (await state(A)).live.length === 2);
+const restoredState = await state(A);
+check("both customers came back", restoredState.live.length === 2, restoredState.live.length);
+check("and nothing from another day came with them",
+  restoredState.live.every(e => (e.createdAt || "").startsWith(LONG_AGO)),
+  restoredState.live.map(e => e.createdAt));
 
 const backOnServer = await waitFor(A, () => true, 100) !== null &&
   (await (await fetch(`${WORKER}/sync?stall=${STALL}&market=${LONG_AGO}&since=0`)).json()).rows;

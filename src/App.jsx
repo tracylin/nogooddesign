@@ -874,13 +874,21 @@ export default function App() {
         (day !== market ? " This phone will switch to that day." : ""))) return;
 
       if (day !== market) {
+        // Restoring into a different day starts from the file alone. Merging
+        // would carry this day's customers across into that one, which is
+        // exactly the piling up that separate market days exist to prevent.
+        try { localStorage.removeItem(cursorKey(stallKey, day)); } catch { /* storage unavailable, carry on */ }
         setMarket(day);
         setExpandedUid(null);
         setHistory(null);
+        setEntries(sortEntries(imported));
+      } else {
+        // Into the same day it is a merge, so a file can fill in what was lost
+        // without throwing away what is here.
+        setEntries(prev => sortEntries(mergeFromServer(prev, imported)));
       }
-      // Imported entries are merged rather than dropped on top, so restoring the
-      // same file twice cannot double anything: they carry stable uids.
-      setEntries(prev => sortEntries(mergeFromServer(prev, imported)));
+      // Imported entries carry stable uids, so restoring the same file twice
+      // cannot double anything.
       setDirty(prev => {
         const next = new Set(prev);
         imported.forEach(e => next.add(e.uid));
@@ -916,12 +924,16 @@ export default function App() {
         !confirm("This phone still has " + unsentCountRef.current + " unsent. Switching to " + day + " leaves them unsent. Continue?")) {
       return;
     }
+    // The cursor for that day has to go with the entries. Keeping it would mean
+    // asking the server for "anything since I last looked", getting nothing,
+    // and sitting on an empty list for a day that is not empty.
+    try { localStorage.removeItem(cursorKey(stallKey, day)); } catch { /* storage unavailable, carry on */ }
     setMarket(day);
     setEntries([]);
     setDirty(new Set());
     setExpandedUid(null);
     setHistory(null);
-  }, [market]);
+  }, [market, stallKey]);
 
   const startNewMarket = () => {
     const today = todayMarket();
