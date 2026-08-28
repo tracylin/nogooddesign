@@ -88,23 +88,35 @@ await B.page.bringToFront();
 took = await waitFor(B, rows => rows.length === 0);
 check("the customer disappeared", took !== null, took === null ? "never arrived" : took + "ms");
 
+// Headless Chrome does not reliably report a background tab as hidden, so the
+// visibility handling is driven directly rather than through tab focus.
+const setVisibility = (p, state) => p.page.evaluate((v) => {
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => v });
+  document.dispatchEvent(new Event("visibilitychange"));
+}, state);
+
 console.log("\n4. Polling stops while the app is off screen");
-await A.page.bringToFront();          // B is now hidden
-await B.page.waitForTimeout(500);
+await B.page.bringToFront();
+await setVisibility(B, "hidden");
+await B.page.waitForTimeout(300);
 B.calls.length = 0;
 await B.page.waitForTimeout(6000);
 check("a hidden phone is not polling", B.calls.length === 0, B.calls.length + " requests while hidden");
 
 console.log("\n5. Coming back on screen syncs straight away");
+await A.page.bringToFront();
 await A.page.getByRole("button", { name: "✲" }).click();
 await A.page.getByRole("button", { name: "done" }).click();
 await A.page.waitForTimeout(900);
-const before = Date.now();
+check("the hidden phone did not see it while asleep", (await live(B)).length === 0, await live(B));
+
 await B.page.bringToFront();
+const before = Date.now();
+await setVisibility(B, "visible");
 took = await waitFor(B, rows => rows.length === 1, 4000);
-check("picked up on return without waiting for a tick", took !== null && took < 3000,
+check("picked up on waking, without waiting for a tick", took !== null && took < 2500,
   took === null ? "never arrived" : took + "ms");
-check("it polled again on becoming visible", B.calls.some(t => t >= before), B.calls.length);
+check("it polled again the moment it woke", B.calls.some(t => t >= before), B.calls.length);
 
 await browser.close();
 console.log("\n" + pass + " passed, " + fail + " failed");
