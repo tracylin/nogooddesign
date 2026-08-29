@@ -383,9 +383,6 @@ function timeoutSignal(ms) {
   setTimeout(() => controller.abort(), ms);
   return controller.signal;
 }
-const BASE_URL = "https://script.google.com/macros/s/";
-function buildUrl(deployId) { return deployId ? BASE_URL + deployId + "/exec" : ""; }
-
 function sortEntries(arr) {
   return [...arr].sort((a, b) => {
     const ka = a.createdAt || a.ts || "";
@@ -402,93 +399,6 @@ function pruneTombstones(entries) {
   return entries.filter(e => !e.deletedAt || new Date(e.deletedAt).getTime() > cutoff);
 }
 
-function enrich(entries) {
-  return entries.map(e => ({
-    ...e,
-    soldItemNames: soldNamesOf(e),
-  }));
-}
-
-// Every network call reports what actually happened. The old code used
-// mode: "no-cors", which made a rejected write look exactly like a successful
-// one, so nothing could ever be retried.
-//
-// Some Apps Script deployments do not return readable CORS headers on POST. If
-// that happens the request still reaches the script, so rather than calling it a
-// failure we send it again in the old opaque mode and say plainly that the write
-// could not be confirmed. setState always sends the full state, so sending it
-// twice changes nothing.
-async function postState(url, payload) {
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
-    return { ok: true, confirmed: true };
-  } catch {
-    try {
-      await fetch(url, {
-        method: "POST", mode: "no-cors",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify(payload),
-      });
-      return { ok: true, confirmed: false };
-    } catch (e) {
-      return { ok: false, error: e.message || "no connection" };
-    }
-  }
-}
-
-async function pushState(deployId, entries) {
-  const url = buildUrl(deployId);
-  if (!url) return { ok: false, error: "no sheet connected" };
-  return postState(url, {
-    action: "setState",
-    state: { entries: enrich(entries), lastModified: new Date().toISOString() },
-  });
-}
-
-async function pushLog(deployId, entry, action) {
-  const url = buildUrl(deployId);
-  if (!url) return { ok: false, error: "no sheet connected" };
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({
-        action: "log",
-        row: {
-          timestamp: new Date().toISOString(),
-          entryId: entry.id,
-          uid: entry.uid || "",
-          device: entry.deviceId || "",
-          type: action,
-          engage: entry.engage || "",
-          amount: entry.amount || "",
-          items: entry.items || "",
-          soldItemNames: soldNamesOf(entry),
-          payment: entry.payment || "",
-          note: entry.note || "",
-          raw: JSON.stringify(entry),
-        },
-      }),
-    });
-    if (!res.ok) return { ok: false, error: "sheet returned " + res.status };
-    return { ok: true };
-  } catch (e) {
-    if (e.name === "TimeoutError" || e.name === "AbortError") {
-      return { ok: false, error: "sync timed out" };
-    }
-    return { ok: false, error: e.message || "no connection" };
-  }
-}
-
-// ─── WORKER SYNC ───
-// Each entry is its own row on the server, so a push says "here are the three
-// entries I changed" instead of "here is everything I know". Two phones adding
-// customers at the same time no longer overwrite one another.
 function makeStallKey() {
   const raw = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
   return raw.replace(/-/g, "").slice(0, 20);
@@ -710,8 +620,6 @@ function saveStr(key, value) {
   try { localStorage.setItem(key, value); } catch { /* storage unavailable, carry on */ }
 }
 
-function loadDeployId() { return loadStr("ngd_deploy_id"); }
-
 // Generated once per stall, then shared with the other phones. It is both the
 // namespace on the server and the only thing keeping the data private, which is
 // why it is long and random rather than something memorable.
@@ -769,6 +677,7 @@ export default function App() {
   const [pickerCat, setPickerCat] = useState("All");
   const [photo, setPhoto] = useState(null);
   const [dayPicker, setDayPicker] = useState(null);
+  const [showConnection, setShowConnection] = useState(false);
   const [photoQty, setPhotoQty] = useState(1);
   const [syncStatus, setSyncStatus] = useState("");
   const [syncError, setSyncError] = useState("");
@@ -779,12 +688,8 @@ export default function App() {
   const [market, setMarket] = useState(() => setupParams().get("market") || loadMarket());
   const [dirty, setDirty] = useState(loadDirty);
 
-  // The Google Sheet is now an export, not the database
-  const [deployId, setDeployId] = useState(loadDeployId);
 
   const [deviceId] = useState(getDeviceId);
-  const [history, setHistory] = useState(null);
-  const [historyError, setHistoryError] = useState("");
   // Every day the server holds, so this phone can notice that another one has
   // already started a new market.
   const [serverDays, setServerDays] = useState([]);
@@ -832,7 +737,6 @@ export default function App() {
   useEffect(() => { saveStr("ngd_sync_url", syncUrl); }, [syncUrl]);
   useEffect(() => { saveStr("ngd_stall_key", stallKey); }, [stallKey]);
   useEffect(() => { saveStr("ngd_market", market); }, [market]);
-  useEffect(() => { saveStr("ngd_deploy_id", deployId); }, [deployId]);
   useEffect(() => {
     try { localStorage.setItem("ngd_dirty", JSON.stringify([...dirty])); } catch { /* storage unavailable, carry on */ }
   }, [dirty]);
@@ -962,10 +866,6 @@ export default function App() {
     return () => clearTimeout(t);
   }, [dirty, syncConfigured, runSync]);
 
-  const logAction = useCallback((entry, action) => {
-    if (entry && deployId) pushLog(deployId, entry, action);
-  }, [deployId]);
-
   // A provisional number so the entry reads correctly before it has synced. The
   // server replaces it with one that is unique across every phone.
   const claimNumber = useCallback((current) => {
@@ -992,8 +892,7 @@ export default function App() {
     setEntries(prev => sortEntries([entry, ...prev]));
     setExpandedUid(entry.uid);
     markDirty(entry.uid);
-    logAction(entry, "add");
-  }, [entries, deviceId, claimNumber, markDirty, logAction]);
+  }, [entries, deviceId, claimNumber, markDirty]);
 
   const deleteEntry = useCallback((uid) => {
     const stamp = new Date().toISOString();
@@ -1001,9 +900,7 @@ export default function App() {
       (e.uid === uid ? { ...e, deletedAt: stamp, ts: stamp, fieldTs: touch(e, ["deletedAt"], stamp) } : e)));
     setExpandedUid(null);
     markDirty(uid);
-    const entry = entriesRef.current.find(e => e.uid === uid);
-    if (entry) logAction({ ...entry, deletedAt: stamp }, "delete");
-  }, [markDirty, logAction]);
+  }, [markDirty]);
 
   // Removes the newest entry this phone created, never whatever happens to be at
   // the top of a merged list.
@@ -1025,12 +922,10 @@ export default function App() {
     markDirty(uid);
   }, [markDirty]);
 
-  const saveAndCollapse = useCallback((uid) => {
+  const saveAndCollapse = useCallback(() => {
     setExpandedUid(null);
-    const entry = entriesRef.current.find(e => e.uid === uid);
-    if (entry) logAction(entry, "update");
     runSync(false);
-  }, [logAction, runSync]);
+  }, [runSync]);
 
   // One place that writes the sold list. A quantity is simply the same id
   // repeated, which the total, the sold-out marker and the day's numbers all
@@ -1125,17 +1020,6 @@ export default function App() {
   // This replaces everything the sheet holds with the day open on this phone.
   // It is how a good record gets overwritten by a phone that was missing rows,
   // so it asks first and names the day it is about to write.
-  const exportToSheet = async () => {
-    if (!deployId) return;
-    if (!confirm("Overwrite the Google Sheet with " + market + ", " + visible.length +
-                 " on this phone?\n\nThe sheet keeps one day at a time. Whatever is in it now is replaced, " +
-                 "including any earlier market. The server keeps every day and is the real backup.")) return;
-    setSyncStatus("exporting…");
-    const result = await pushState(deployId, visible);
-    setSyncStatus(result.ok ? (result.confirmed ? "exported" : "sent") : "export failed");
-    setTimeout(() => setSyncStatus(""), 2500);
-  };
-
   const downloadToday = () => {
     const ok = downloadFile("nogooddesign-" + market + ".csv", toCsv(visible), "text/csv;charset=utf-8");
     setSyncStatus(ok ? "saved" : "save failed");
@@ -1207,8 +1091,7 @@ export default function App() {
       setEntries([]);
       setDirty(new Set());
       setExpandedUid(null);
-      setHistory(null);
-      setSealedDays(prev => prev.filter(d => d !== market));
+        setSealedDays(prev => prev.filter(d => d !== market));
       setSyncError("");
       setSyncStatus("deleted " + data.removed);
     } catch (e) {
@@ -1255,21 +1138,6 @@ export default function App() {
     return () => { alive = false; clearTimeout(first); clearInterval(timer); };
   }, [syncConfigured, fetchDays]);
 
-  const loadHistory = async () => {
-    if (!syncConfigured) return;
-    setHistoryError("");
-    setHistory(null);
-    try {
-      const res = await fetch(syncBase(syncUrl) + "/markets?stall=" + encodeURIComponent(stallKey),
-        { signal: timeoutSignal(SYNC_TIMEOUT) });
-      if (!res.ok) { setHistoryError("could not load history"); return; }
-      const data = await res.json();
-      setHistory(Array.isArray(data.markets) ? data.markets : []);
-    } catch {
-      setHistoryError("could not reach the server");
-    }
-  };
-
   const restoreFromFile = async (file) => {
     if (!file) return;
     try {
@@ -1286,8 +1154,7 @@ export default function App() {
         try { localStorage.removeItem(cursorKey(stallKey, day)); } catch { /* storage unavailable, carry on */ }
         setMarket(day);
         setExpandedUid(null);
-        setHistory(null);
-        setEntries(sortEntries(imported));
+            setEntries(sortEntries(imported));
       } else {
         // Into the same day it is a merge, so a file can fill in what was lost
         // without throwing away what is here.
@@ -1339,15 +1206,7 @@ export default function App() {
     setEntries([]);
     setDirty(new Set());
     setExpandedUid(null);
-    setHistory(null);
   }, [market, stallKey]);
-
-  const startNewMarket = () => {
-    const today = todayMarket();
-    if (today === market) return;
-    if (!confirm("Start " + today + "? This phone's list clears. " + market + " stays on the server.")) return;
-    switchToDay(today);
-  };
 
   const clearData = () => {
     if (confirm("Clear this phone's copy? The server keeps everything, and the next sync pulls it back.")) {
@@ -1457,6 +1316,14 @@ export default function App() {
                           : day.entries + (day.entries === 1 ? " entry" : " entries"))}
                     </span>
                   </button>
+                  {syncConfigured && (
+                    <>
+                      <a style={S.historyLink} href={exportUrl(day.market, "csv")}
+                        target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}>CSV</a>
+                      <a style={S.historyLink} href={exportUrl(day.market, "json")}
+                        target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}>JSON</a>
+                    </>
+                  )}
                 </div>
               ))}
               {Array.isArray(dayPicker) && dayPicker.length === 0 && (
@@ -1469,8 +1336,8 @@ export default function App() {
                   <label style={S.label}>Another day</label>
                   <input style={S.modalInput} type="date" value=""
                     onChange={ev => { if (ev.target.value) { startDay(ev.target.value); setDayPicker(null); } }} />
-                  <p style={S.hint}>Any date, including one that has not arrived. Counting into a day
-                    is what creates it, so a market can be set up the night before.</p>
+                  <p style={S.hint}>Any date, including one that has not arrived, so a market can be
+                    set up the night before. Tap a day to open it, or take it away as a file.</p>
                 </>
               )}
             </div>
@@ -1527,133 +1394,93 @@ export default function App() {
             </div>
             <div style={S.rule} />
             <div style={S.modalBody}>
-            <label style={S.label}>Sync address</label>
-            <input style={S.modalInput} value={syncUrl} inputMode="url"
-              onChange={e => setSyncUrl(e.target.value.trim())}
-              placeholder="https://nogooddesign-sync.workers.dev" />
-            <p style={S.hint}>Paste the same address into every phone</p>
 
-            <label style={S.label}>Stall key</label>
-            <input style={S.modalInput} value={stallKey}
-              onChange={e => setStallKey(e.target.value.trim())} placeholder="20 characters" />
-            <p style={S.hint}>
-              Your phones share this. It keeps the stall private, so treat it like a password.
-            </p>
-
-            <label style={S.label}>Market day</label>
-            <input style={S.modalInput} type="date" value={market}
-              onChange={e => e.target.value && switchToDay(e.target.value)} />
-            <p style={S.hint}>
-              Each market day is counted separately, so days never pile up together.
-            </p>
-            {market !== todayMarket() && (
-              <button style={S.modalBtn} onClick={startNewMarket}>Start today ({todayMarket()})</button>
+            {syncConfigured && !showConnection ? (
+              <>
+                <div style={S.connRow}>
+                  <span style={S.connText}>
+                    {syncError
+                      ? "Cannot reach the server: " + syncError
+                      : unsentCount > 0
+                        ? unsentCount + " waiting to send"
+                        : "Connected, syncing live"}
+                  </span>
+                  <button style={S.linkBtn} onClick={() => setShowConnection(true)}>Change</button>
+                </div>
+                <p style={S.hint}>This phone is {deviceId}.</p>
+              </>
+            ) : (
+              <>
+                <label style={S.label}>Sync address</label>
+                <input style={S.modalInput} value={syncUrl} inputMode="url"
+                  onChange={e => setSyncUrl(e.target.value.trim())}
+                  placeholder="https://nogooddesign-sync.workers.dev" />
+                <label style={S.label}>Stall key</label>
+                <input style={S.modalInput} value={stallKey}
+                  onChange={e => setStallKey(e.target.value.trim())} placeholder="20 characters" />
+                <p style={S.hint}>
+                  Both phones need the same two. The key is what keeps the stall private, so treat it
+                  like a password.
+                </p>
+                {syncConfigured && (
+                  <button style={S.linkBtn} onClick={() => setShowConnection(false)}>Done</button>
+                )}
+              </>
             )}
-
-            {syncConfigured && (
-              <p style={S.connectedText}>
-                {syncError
-                  ? "Cannot reach sync: " + syncError
-                  : unsentCount > 0
-                    ? unsentCount + " waiting to send"
-                    : "Connected \u00b7 syncing live"}
-              </p>
-            )}
-            <p style={S.hint}>This phone is {deviceId}</p>
-            <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={() => { runSync(true); setShowSettings(false); }}>Sync now</button>
               <button style={S.modalBtn} onClick={copySetupLink} disabled={!syncConfigured}>Copy setup link</button>
             </div>
-            <p style={S.hint}>Send the setup link to the other phone and open it there. It carries the address, the key and the day.</p>
+            <p style={S.hint}>The setup link carries the address, the key and the day. Open it on the other phone.</p>
 
             <div style={S.rule} />
             <label style={S.label}>Backup</label>
-            <p style={S.hint}>
-              A copy you keep yourself, so the day does not depend on this app or
-              this service still being here.
-            </p>
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={downloadToday}>Save as CSV</button>
               <button style={S.modalBtn} onClick={downloadTodayJson}>Save as JSON</button>
             </div>
-            <p style={S.hint}>
-              Saving works with no signal, from what is on this phone. CSV is for
-              reading, JSON is the one to keep if you might need to put it back.
-            </p>
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={() => fileInput.current?.click()}>Restore from file</button>
             </div>
             <input ref={fileInput} type="file" accept=".json,application/json" style={{ display: "none" }}
               onChange={e => { restoreFromFile(e.target.files?.[0]); e.target.value = ""; }} />
             <p style={S.hint}>
-              Takes a JSON file saved here or downloaded below. Restoring the same
-              file twice cannot duplicate anything.
+              Saved from this phone, so it works with no signal. JSON is the one that can be put back,
+              and restoring the same file twice cannot duplicate anything. Any past day can be
+              downloaded from the day list at the top of the screen.
             </p>
 
             <div style={S.rule} />
-            <label style={S.label}>Past market days</label>
-            <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={loadHistory} disabled={!syncConfigured}>
-                {history ? "Refresh" : "Show days"}
-              </button>
-            </div>
-            {historyError && <p style={S.connectedText}>{historyError}</p>}
-            {history && history.length === 0 && <p style={S.hint}>Nothing saved on the server yet.</p>}
-            {history && history.length > 0 && (
-              <div style={S.historyList}>
-                {history.map(day => (
-                  <div key={day.market} style={S.historyRow}>
-                    {/* Tapping a day is what anyone tries first, so it opens it. */}
-                    <button
-                      style={day.market === market ? S.historyOpenCurrent : S.historyOpen}
-                      onClick={() => { switchToDay(day.market); setShowSettings(false); }}
-                      disabled={day.market === market}
-                    >
-                      <span style={S.historyDay}>{day.market}</span>
-                      <span style={S.historyCount}>
-                        {day.market === market ? "open" : day.entries + (day.entries === 1 ? " entry" : " entries")}
-                      </span>
-                    </button>
-                    <a style={S.historyLink} href={exportUrl(day.market, "csv")}
-                      target="_blank" rel="noreferrer">CSV</a>
-                    <a style={S.historyLink} href={exportUrl(day.market, "json")}
-                      target="_blank" rel="noreferrer">JSON</a>
-                  </div>
-                ))}
-              </div>
-            )}
-            {history && history.length > 0 && (
-              <p style={S.hint}>Tap a day to look at it. CSV and JSON download it instead.</p>
-            )}
-
-            <div style={S.rule} />
-            <label style={S.label}>Google Sheet export (optional)</label>
-            <input style={S.modalInput} value={deployId}
-              onChange={e => setDeployId(e.target.value.trim())} placeholder="AKfycbx..." />
-            <p style={S.hint}>Apps Script deployment ID. The sheet is a backup now, not the source.</p>
-            <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={exportToSheet} disabled={!deployId}>Send today to sheet</button>
-            </div>
-
-            <div style={S.rule} />
-            <label style={S.label}>This market day</label>
+            <label style={S.label}>Finishing {market}</label>
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={() => setDaySeal(!sealed)} disabled={!syncConfigured}>
-                {sealed ? "Unseal " + market : "Seal " + market}
+                {sealed ? "Unseal this day" : "Seal this day"}
               </button>
-              <button style={S.modalBtn} onClick={eraseDay} disabled={!syncConfigured || sealed}>Delete day</button>
             </div>
             <p style={S.hint}>
               {sealed
                 ? "Sealed. The server refuses every change to this day, from either phone. Downloads still work."
-                : "Sealing finishes a day: it becomes an archive that neither phone can change. Deleting removes it and everything counted on it, for good, and is refused once a day is sealed."}
+                : "Sealing makes a day an archive. Neither phone can add to it or change it after that, though it can be unsealed again."}
             </p>
 
             <div style={S.rule} />
+            <label style={S.labelDanger}>Careful</label>
             <div style={S.modalBtnRow}>
-              <button style={S.modalBtn} onClick={clearData}>Clear local</button>
+              <button style={S.modalBtn} onClick={clearData}>Clear this phone</button>
             </div>
+            <p style={S.hint}>
+              Empties this phone's copy of {market}. The server keeps the day and the next sync pulls
+              it back, so this is the one to reach for if a phone gets confused.
+            </p>
+            <div style={S.modalBtnRow}>
+              <button style={S.dangerBtn} onClick={eraseDay} disabled={!syncConfigured || sealed}>
+                Delete {market} everywhere
+              </button>
+            </div>
+            <p style={S.hint}>
+              Removes the day and everything counted on it, on both phones, for good. Refused while a
+              day is sealed, and it asks for the date to be typed.
+            </p>
             </div>
           </div>
         </div>
@@ -1710,7 +1537,7 @@ export default function App() {
             {visible.map(entry => (
               expandedUid === entry.uid ? (
                 <ExpandedEntry key={entry.uid} entry={entry} onUpdate={updateEntry}
-                  onDone={() => saveAndCollapse(entry.uid)} onDelete={() => deleteEntry(entry.uid)} onPickCatalog={() => setShowCatalogPicker(entry.uid)} />
+                  onDone={saveAndCollapse} onDelete={() => deleteEntry(entry.uid)} onPickCatalog={() => setShowCatalogPicker(entry.uid)} />
               ) : (
                 <CollapsedEntry key={entry.uid} entry={entry} onTap={() => !sealed && setExpandedUid(entry.uid)} />
               )
@@ -2042,6 +1869,11 @@ const S = {
   historyDay: { fontSize: 12, fontFamily: SANS, color: BK, textDecoration: "underline", textUnderlineOffset: 2 },
   historyCount: { fontSize: 11, color: "#a09a92", whiteSpace: "nowrap" },
   historyLink: { fontSize: 11, color: BK, textDecoration: "underline", padding: "2px 0" },
+  connRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "4px 0 2px" },
+  connText: { fontFamily: SANS, fontSize: 12, color: BK },
+  linkBtn: { background: "none", border: "none", padding: "2px 0", fontFamily: SANS, fontSize: 11, color: BK, textDecoration: "underline", textUnderlineOffset: 2, cursor: "pointer" },
+  labelDanger: { fontFamily: SANS, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: BK, display: "block", marginBottom: 6, marginTop: 14 },
+  dangerBtn: { flex: 1, background: "none", border: `1px solid ${BK}`, color: BK, fontFamily: SANS, fontSize: 12, padding: "12px 0", cursor: "pointer" },
   sealedNote: { fontFamily: SANS, fontSize: 11.5, color: "#a09a92", textAlign: "center", lineHeight: 1.45, maxWidth: 260, marginTop: 4 },
   sealedBadge: { fontFamily: SANS, fontSize: 10, color: BG, background: BK, padding: "2px 6px", letterSpacing: "0.06em", textTransform: "uppercase" },
   dayList: { padding: "6px 20px 18px", overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y" },

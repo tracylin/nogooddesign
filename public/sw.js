@@ -2,7 +2,7 @@
 // force-close and reopen would otherwise give you a blank screen.
 // Bump this whenever the shell changes in a way phones should not keep a stale
 // copy of. Activating drops every older cache.
-const SHELL = "ngd-shell-v10";
+const SHELL = "ngd-shell-v11";
 
 // Product photos are kept apart from the shell. Their names never change, they
 // are 2.4MB all together, and a shell bump should not make a phone fetch them
