@@ -344,6 +344,13 @@ function soldNamesOf(entry) {
   return saleNames(entry, CATALOG);
 }
 
+// The pictures in IMAGES are 96px, which is right for a row and useless blown
+// up. The large ones sit beside the build rather than inside it, so the bundle
+// stays small and the service worker can pull them down quietly for offline.
+function photoUrl(id) {
+  return import.meta.env.BASE_URL + "img/" + id + ".jpg";
+}
+
 const CATEGORIES = ["All", "Hats", "Bags", "Charms", "Belts", "Rings", "Bracelets"];
 const ENGAGEMENTS = ["Stopped", "Touched", "Asked", "Bought"];
 
@@ -779,6 +786,8 @@ export default function App() {
   const [catFilter, setCatFilter] = useState("All");
   const [showCatalogPicker, setShowCatalogPicker] = useState(null);
   const [pickerCat, setPickerCat] = useState("All");
+  const [photo, setPhoto] = useState(null);
+  const [photoQty, setPhotoQty] = useState(1);
   const [syncStatus, setSyncStatus] = useState("");
   const [syncError, setSyncError] = useState("");
 
@@ -1020,11 +1029,13 @@ export default function App() {
     runSync(false);
   }, [logAction, runSync]);
 
-  const toggleSoldItem = useCallback((uid, catalogId) => {
+  // One place that writes the sold list. A quantity is simply the same id
+  // repeated, which the total, the sold-out marker and the day's numbers all
+  // count correctly already, so nothing new had to be stored.
+  const applySoldIds = useCallback((uid, makeNext) => {
     setEntries(prev => prev.map(e => {
       if (e.uid !== uid) return e;
-      const ids = e.soldCatalogIds || [];
-      const next = ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId];
+      const next = makeNext(e.soldCatalogIds || []);
       const sum = next.reduce((t, cid) => { const c = catalog.find(x => x.id === cid); return t + (c?.price || 0); }, 0);
       const now = new Date().toISOString();
       const base = ["soldCatalogIds", "soldItems", "soldItemNames"];
@@ -1048,6 +1059,12 @@ export default function App() {
     }));
     markDirty(uid);
   }, [markDirty, catalog]);
+
+  const toggleSoldItem = useCallback((uid, catalogId) => applySoldIds(uid,
+    ids => (ids.includes(catalogId) ? ids.filter(x => x !== catalogId) : [...ids, catalogId])), [applySoldIds]);
+
+  const setSoldQuantity = useCallback((uid, catalogId, n) => applySoldIds(uid,
+    ids => [...ids.filter(x => x !== catalogId), ...Array(Math.max(0, n)).fill(catalogId)]), [applySoldIds]);
 
   // ── derived ──
   const visible = entries.filter(e => !e.deletedAt);
@@ -1270,7 +1287,9 @@ export default function App() {
             </div>
             <div style={S.rule} />
             <div style={S.pickerList}>
-              {catalog.filter(c => pickerCat === "All" || c.category === pickerCat).map(item => {
+              {catalog.filter(c => pickerCat === "All" || c.category === pickerCat)
+                .slice().sort((x, y) => (y.price ?? -1) - (x.price ?? -1) || x.name.localeCompare(y.name))
+                .map(item => {
                 const entry = visible.find(e => e.uid === showCatalogPicker);
                 const isSelected = entry?.soldCatalogIds?.includes(item.id);
                 const isSoldByOther = soldOutIds.has(item.id) && !isSelected;
@@ -1278,8 +1297,15 @@ export default function App() {
                   <div key={item.id} style={{ ...S.pickerItem, textDecoration: isSoldByOther ? "line-through" : "none" }}
                     onClick={() => !isSoldByOther && toggleSoldItem(showCatalogPicker, item.id)}>
                     <div style={S.pickerCheck}>{isSelected ? "■" : "□"}</div>
-                    <div style={S.pickerThumb}>
+                    <div style={S.pickerThumbTap} onClick={ev => {
+                      ev.stopPropagation();
+                      const held = (entry?.soldCatalogIds || []).filter(x => x === item.id).length;
+                      setPhotoQty(Math.max(1, held));
+                      // Something already sold can still be looked at, just not sold again.
+                      setPhoto({ id: item.id, mode: isSoldByOther ? "look" : "pick", uid: showCatalogPicker });
+                    }}>
                       {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : <div style={S.thumbFallback}>?</div>}
+                      <span style={S.thumbHint}>\u2922</span>
                     </div>
                     <span style={S.pickerName}>{item.name}</span>
                     <span style={S.pickerPrice}>{item.price ? `$${item.price}` : "—"}</span>
@@ -1291,6 +1317,45 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* PHOTO */}
+      {photo && (() => {
+        const item = catalog.find(c => c.id === photo.id);
+        if (!item) return null;
+        const stock = item.qty || 1;
+        const close = () => setPhoto(null);
+        return (
+          <div style={S.photoOverlay} onClick={close}>
+            <div style={S.photoCard} onClick={ev => photo.mode === "pick" && ev.stopPropagation()}>
+              <div style={S.photoFrame}>
+                <img src={photoUrl(item.id)} style={S.photoImg} alt=""
+                  onError={ev => { if (IMAGES[item.id]) ev.target.src = IMAGES[item.id]; }} />
+              </div>
+              <div style={S.photoBar}>
+                <span style={S.photoName}>{item.name}</span>
+                <span style={S.photoPrice}>{item.price != null ? "$" + item.price : "\u2014"}</span>
+              </div>
+              {photo.mode === "pick" && (
+                <>
+                  {stock > 1 && <div style={S.photoStock}>{stock} in stock</div>}
+                  <div style={S.qtyRow}>
+                    <button style={S.qtyBtn} onClick={() => setPhotoQty(q => Math.max(1, q - 1))}>\u2212</button>
+                    <span style={S.qtyNum}>{photoQty}</span>
+                    <button style={S.qtyBtn} onClick={() => setPhotoQty(q => Math.min(stock, q + 1))}>+</button>
+                  </div>
+                  <div style={S.photoBtns}>
+                    <button style={S.photoCloseBtn} onClick={close}>Close</button>
+                    <button style={S.photoBuyBtn}
+                      onClick={() => { setSoldQuantity(photo.uid, item.id, photoQty); close(); }}>
+                      {"Bought" + (photoQty > 1 ? " \u00d7" + photoQty : "")}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* SETTINGS */}
       {showSettings && (
@@ -1475,7 +1540,8 @@ export default function App() {
         </div>
       ) : (
         <div style={S.content}>
-          <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} soldOutIds={soldOutIds} />
+          <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} soldOutIds={soldOutIds}
+            onPhoto={id => setPhoto({ id, mode: "look" })} />
         </div>
       )}
 
@@ -1707,7 +1773,7 @@ function Numbers({ stats, market }) {
   );
 }
 
-function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldOutIds }) {
+function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldOutIds, onPhoto }) {
   const ref = useRef(null);
   return (
     <div style={S.priceWrap}>
@@ -1733,8 +1799,9 @@ function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldO
               const sold = soldOutIds.has(item.id);
               return (
                 <div key={item.id} style={S.catItem}>
-                  <div style={S.thumb}>
+                  <div style={S.thumbTap} onClick={() => onPhoto(item.id)}>
                     {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : <div style={S.thumbFallback}>?</div>}
+                    <span style={S.thumbHint}>\u2922</span>
                   </div>
                   <div style={S.catItemInfo}>
                     <span style={{ ...S.catItemName, textDecoration: sold ? "line-through" : "none" }}>
@@ -1915,6 +1982,23 @@ const S = {
   catItem: { display: "flex", alignItems: "center", gap: 14, padding: "10px 20px", borderBottom: `1px solid ${BK}` },
   thumb: { width: 52, height: 52, flexShrink: 0, overflow: "hidden", border: `1px solid ${BK}` },
   thumbImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+  thumbTap: { width: 56, height: 56, flexShrink: 0, border: `1px solid ${BK}`, overflow: "hidden", position: "relative", cursor: "pointer" },
+  pickerThumbTap: { width: 40, height: 40, flexShrink: 0, border: `1px solid ${BK}`, overflow: "hidden", position: "relative", cursor: "pointer" },
+  thumbHint: { position: "absolute", right: 0, bottom: 0, background: BK, color: BG, fontSize: 9, lineHeight: 1, padding: "2px 3px" },
+  photoOverlay: { position: "fixed", inset: 0, background: "rgba(26,26,26,0.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 200 },
+  photoCard: { width: "100%", maxWidth: 340, background: BG, border: `1px solid ${BK}`, padding: 12 },
+  photoFrame: { width: "100%", aspectRatio: "1 / 1", border: `1px solid ${BK}`, overflow: "hidden", background: BG },
+  photoImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+  photoBar: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, padding: "10px 2px 0" },
+  photoName: { fontFamily: SANS, fontSize: 13, color: BK, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  photoPrice: { fontFamily: SERIF, fontSize: 22, color: BK, flexShrink: 0 },
+  photoStock: { fontFamily: SANS, fontSize: 10, color: "#a09a92", padding: "2px 2px 0" },
+  qtyRow: { display: "flex", alignItems: "center", justifyContent: "center", marginTop: 10, border: `1px solid ${BK}` },
+  qtyBtn: { flex: 1, background: "none", border: "none", fontFamily: SANS, fontSize: 20, color: BK, padding: "6px 0", cursor: "pointer" },
+  qtyNum: { flex: 1, textAlign: "center", fontFamily: SERIF, fontSize: 22, color: BK, borderLeft: `1px solid ${BK}`, borderRight: `1px solid ${BK}`, padding: "4px 0" },
+  photoBtns: { display: "flex", gap: 8, marginTop: 10 },
+  photoCloseBtn: { flex: 1, background: "none", border: `1px solid ${BK}`, color: BK, fontFamily: SANS, fontSize: 12, padding: "10px 0", cursor: "pointer" },
+  photoBuyBtn: { flex: 2, background: BK, border: `1px solid ${BK}`, color: BG, fontFamily: SANS, fontSize: 12, padding: "10px 0", cursor: "pointer" },
   thumbFallback: {
     width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center",
     background: BK, color: BG, fontFamily: SANS, fontSize: 14,
