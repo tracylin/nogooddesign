@@ -334,7 +334,7 @@ async function eraseMarket(db, stall, market) {
 }
 
 async function marketsFor(db, stall) {
-  const { results } = await db
+  const { results: counted } = await db
     .prepare(
       "SELECT e.market AS market, " +
       "  COUNT(*) FILTER (WHERE e.deleted_at IS NULL) AS entries, " +
@@ -344,7 +344,18 @@ async function marketsFor(db, stall) {
       "WHERE e.stall = ? GROUP BY e.market ORDER BY e.market DESC LIMIT 400")
     .bind(stall)
     .all();
-  return results || [];
+  // A market can be set up before anyone has counted into it, which is the
+  // point of setting it up the night before. Those days have a counter row and
+  // no entries, so they would otherwise be invisible to the other phone.
+  const { results: opened } = await db
+    .prepare("SELECT market, sealed_at FROM counters WHERE stall = ? ORDER BY market DESC LIMIT 400")
+    .bind(stall)
+    .all();
+  const byDay = new Map();
+  (opened || []).forEach(c => byDay.set(c.market,
+    { market: c.market, entries: 0, last_activity: null, sealed_at: c.sealed_at }));
+  (counted || []).forEach(e => byDay.set(e.market, e));
+  return [...byDay.values()].sort((a, b) => (a.market < b.market ? 1 : a.market > b.market ? -1 : 0));
 }
 
 async function rowsFor(db, stall, market, includeDeleted) {
@@ -418,6 +429,24 @@ export default {
             "Cache-Control": "no-store", ...CORS,
           },
         });
+      } catch (e) {
+        return fail(e.message || "server error", 500);
+      }
+    }
+
+    // Setting a market up before it happens, so both phones can see it coming.
+    // It creates nothing but the day itself.
+    if (url.pathname === "/open") {
+      const day = (url.searchParams.get("market") || "").trim();
+      if (stallOnly.length < MIN_STALL_KEY) return fail("stall key must be at least 12 characters", 400);
+      if (!day || day.length > 64) return fail("market is required", 400);
+      if (request.method !== "POST") return fail("method not allowed", 405);
+      if (!env.DB) return fail("the D1 database is not bound to this Worker", 500);
+      try {
+        await ensureSchema(env.DB);
+        await env.DB.prepare("INSERT OR IGNORE INTO counters (stall, market) VALUES (?, ?)")
+                    .bind(stallOnly, day).run();
+        return json({ ok: true, market: day });
       } catch (e) {
         return fail(e.message || "server error", 500);
       }

@@ -301,5 +301,21 @@ const restarted = (await pull(EDAY, 0)).body.rows;
 check("one customer", restarted.length === 1, restarted.length);
 check("numbered from one again, not from four", restarted[0].id === 1, restarted[0].id);
 
+console.log("\n23. A market can be set up before it happens");
+const FDAY = "2026-12-19";
+const opened = await post("/open", FDAY, {});
+check("opening a day is accepted", opened.status === 200, opened.body);
+const listed23 = await (await fetch(`${BASE}/markets?stall=${encodeURIComponent(STALL)}`)).json();
+const row23 = listed23.markets.find(m => m.market === FDAY);
+check("it shows in the day list", !!row23, listed23.markets.map(m => m.market));
+check("with nobody counted into it yet", row23 && row23.entries === 0, row23);
+check("and it is not sealed", row23 && !row23.sealed, row23);
+check("opening it twice changes nothing", (await post("/open", FDAY, {})).status === 200);
+await push(FDAY, 0, [entry("f1", "phoneA")]);
+const after23 = (await (await fetch(`${BASE}/markets?stall=${encodeURIComponent(STALL)}`)).json())
+  .markets.find(m => m.market === FDAY);
+check("once someone counts, it reads as one", after23.entries === 1, after23);
+check("numbered from one", (await pull(FDAY, 0)).body.rows[0].id === 1);
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);

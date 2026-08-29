@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { saleLines, saleNames, snapshotOf } from "./sale.js";
 import { computeStats } from "./stats.js";
 
@@ -114,7 +114,6 @@ const IMAGES = {
   "c27": "data:image/jpeg;base64,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",
   "c28": "data:image/jpeg;base64,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",
   "c29": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgwKCA0MCwwPDg0QFCIWFBISFCkdHxgiMSszMjArLy42PE1CNjlJOi4vQ1xESVBSV1dXNEFfZl5UZU1VV1P/2wBDAQ4PDxQSFCcWFidTNy83U1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1P/wAARCABgAGADASIAAhEBAxEB/8QAGwABAAIDAQEAAAAAAAAAAAAAAAUGAgMEAQf/xAAsEAACAgEDAgUEAQUAAAAAAAAAAQIDBAURIRJBBhMxUXEUImGRoUKBscHh/8QAGAEBAQEBAQAAAAAAAAAAAAAAAAEDAgT/xAAfEQEBAQACAwADAQAAAAAAAAAAAQIDERIhMSNBUWH/2gAMAwEAAhEDEQA/APpwAAAAAc+fbGnBunJNxUedv0dBzai5rAtdcVKe3Cfcs+jTdjxp0Z0wl5SjXspez9zro3+nr3e76Vv+jj1F13V04kk272tkvZctkguFwKoACIAAAAAAAAGjNrlbh3QhPok4vaXsbyK8R2ShpjUW11yUXt3RZ9d4z5amWeBKeTlOycV0UwUYP3bXLJIrXhOy125Nc5ycEotRfuWUV1y8d493NAARkAAAAAAAAEZrtavxY0KaU5NuK23baRJkHq+q4uFmVzhdCWRFOEoJdWyfPO3p6Dvr26xbNdx54fwvpL7+ua8yUI7x2a29d/knSuYXiLEyNSTvuhSlW4py4Tba7/2LFGSlFOLTT5TXckvlO+nXJrWtd6+vQAVmAAAAAAAAhPEGTc0sTHt8rqj1WTXql2S+eSuxqlp8+luuFNkN1Y+Z9f5XdbEhqTu+tz7o/dNtxrj8LZfycOnY0IZEXVb1XxklkOUupy45W/yyb1mfjt+tePHcuv45IW5OTY1XDDu6Xy3xuvynyTGlapHTtUowJcY964W/Fc9+NvZMgMml06/T5NqnkSsbsUFslHfv7ceqNWuycM9WQlzGMZJ+zTexOOTz8Zb8a82fUvU9vqQMKJ+ZRXN+sop/wZnTygAAAAAAAKpqt8aNWtotXT1vqhLtLf8A6V7OwXhWfUY1Mp778wb3j8l41vRq9UqTUvLvgvtn2+GVzIw9bxItPFjcktlOv7v4LZfV4+u/2149+P0wr420OawnjyaSbklvL/f7K9n12ZOqSoSbsssUIpfnZI74U660qq8XIf5dXP7ZYfDfhieFkfX6jJWZX9Ed91D8t93/AIO8zWLbqz/DVlvcWauChXGC9IpIyAM2QAAAAAAAAAAAAAAAAAAP/9k=",
-  "c30": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgwKCA0MCwwPDg0QFCIWFBISFCkdHxgiMSszMjArLy42PE1CNjlJOi4vQ1xESVBSV1dXNEFfZl5UZU1VV1P/2wBDAQ4PDxQSFCcWFidTNy83U1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1P/wAARCABgAGADASIAAhEBAxEB/8QAGgAAAgMBAQAAAAAAAAAAAAAAAAECAwQFBv/EAC0QAAICAQMDAQcEAwAAAAAAAAECAAMRBBIxIUFRYRMiMkJxgaEFFTNiI5HR/8QAGAEBAAMBAAAAAAAAAAAAAAAAAAECAwT/xAAdEQEAAwADAAMAAAAAAAAAAAAAAQIRAyFREjFB/9oADAMBAAIRAxEAPwD2MIQlg4QhAcIQgOEIoDiMcUBg5hFwciPkZgQhFHAIxFAQHwOspe4g5U/aFtoHTPSYdRWxy6c8czm5L/kL1r66Vdy2ehlmJx9PYynDZ3AToU6hWGMyacvpavjRIWWLWuWOJDUXiqkuOp7CcJ/1N6dZc125mC/xAbsAcsuPHJB+om2qOpYdWymxLFQDqEK8jwes2VNuQHyMzHSbNWil8CvyPmmwDaB2xJgKOKEkOQtfAwOYW2CtevM59lxZyyHP9f8Akx5OTOoXrXUjqkO5HHBwcyRtBTdWN3oJnsRNSvUnIirqNVfUjI7ic2y0yGlyw4AxM7LcGz0x6SdebE91+svXJ93b7xjNNxRbpTqlIGA/Q7iM8cCTq0dz3i3ULUGHzIMEzfUgRABLJ10rkMZnSAwINxHIv8JmiEYFtozETgdZi1mo9kN3biZ3v8YTWNlOxw7FW7zC1B053KSRHRqFufquG8yxrGDFSDgd5yTO9toiY6Kt1tAYdD5lpHZhjMjSAeAMy5HymLUx5BiCVNen9gSyMfp5nQorIG5viP4lVFYJ35O35QZpnRx0ztna2nHFFN1EpFzwPJhmQU7nJB46QKNU7IgKqWHfEzF1sXOMia6rUurDIcgyi7SAktUdjH/RmN6b3C1ZxmbaGGxVznzLHAOO8w2UWreA2VI49ZvQb1AYlSO/mc2TE5LXYUA2K5K8eMTZTuvwDwOZAodwVepM2VIEQATTjps7KtrLB0EcjCdbJKKGZVdcKxjljwIDtcgbV+I8SVagKB4lVKHJd+rH8S4QOU9Vmnc2UHHkdjL6NfXZhbP8b+G4P0M0smZlv0iPyOZAvuqW5MEfQ+JmUWVNsdS/hgJSNPfT/BawHjkSQ1err+OpH9R0lLVi32mJb6a9oyfiPMtnNH6lZ30zfYx/uFxHu6Y/cy0RiHSkWdVGWIA8mc72+st4C1/kyaaQ2HNzs59T0lha2rNh26cbv7HiSqow25yWc8kyddSoMAS0CADiPPSIcRiEP//Z",
   "r24": "data:image/jpeg;base64,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",
   "r25": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgwKCA0MCwwPDg0QFCIWFBISFCkdHxgiMSszMjArLy42PE1CNjlJOi4vQ1xESVBSV1dXNEFfZl5UZU1VV1P/2wBDAQ4PDxQSFCcWFidTNy83U1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1P/wAARCABgAGADASIAAhEBAxEB/8QAGgABAAMBAQEAAAAAAAAAAAAAAAQFBgMCB//EADIQAAEEAQMCBAUEAAcAAAAAAAEAAgMEEQUSITFRBhNBYSIjMnGBFEKRsTNicqHB0eH/xAAWAQEBAQAAAAAAAAAAAAAAAAAAAQL/xAAYEQEBAQEBAAAAAAAAAAAAAAAAEQEhQf/aAAwDAQACEQMRAD8A+nIiICIiAiLibUQtitu+aW7seyDsiLyyRkgJY4OAJBwfVB6REQEREBERBHluwRT+S94D8ZwurJo5Poka77FRdRpfqGb4+JW9P83ssld1a1p95o/RNsVCzLieC0jqFKsrZSXa8bg10gLjwAOSVQ1bjX+JW7nt83fKx7A7lvTGR+B/KjQWaWr1JZ6LZo3wODZI3s5BxnH/AKFzjlkxvLTkgjfxnH94/wCkGvmsRQNzI8N7D1KoNA1FrGWWSgt2SHcAOhJ4P5XiWvcEjHAh/ruzx+cry6J1SHB8qJkruWQxgBx90GiitQSs3skaR7nGF5ferM6zMP8ApOf6WTnc9tAzwMIw9u7Ee54Z6lo6Z6KVptKxqDszbo4gfpLsnHue/sEpGhq3obT3NiLjtGSccKSucEEdeIRxNDWhdFUEREBZfVmEahKIwQ7O5uBnnGf91cXNOfLI6WCd8ch9NxAVLYFqmNk0RL3kfO3bieeffopq48SR/oqz4YoJYnWQ+YmNowHADa0/fA/nCxVjV71ECCxVNeVuHDORtB9QPValsckUBjs2C9m5zw+UEZB9D34VX4nqRanWpSQBznRRmMvaMAt/aP7TgmVvHlEUWunZJ+oDQDHtyCfY9lZ6B4ipa95sTYntkYNxjkG4Ed89F80ZpMrJwLHwtAyQOp56LYeGxY0s2JKWnssQSYY9okDHgjnOT91LnizZWpdNDt8qJvl7TjbjCuaLWtpxbcYLc8d1mH6kyfAl0q43uQWOx/BypNa0+A/ImeGH9r2nI/GEqNKig0rks7w18R2kfWGluPvlTlpBERAUDWY2yUiT9bXAsx6nsp6oPE11zKckVfD7DvgiZt3FzjwTj2B6900VcsgZNVkgd5jYi4TSHkOzgYH2KnMe2UPdGwccuaQOR3XCDSbVfTYvMY1scMYaIy74j3J9/ZeGtJq4a8RskG4uzyG+mOyyqFr+nyW4oZKlV8socSdjeoA6E9Oqh+G6NyPzp9QaWF/AhcPp98LRQ321mRxuxhvwtA7YyFDlmlmpWTAYpbcTt2zdgFp6E+2c/wAJFrxRbO9r47EsfnP+gAYaR2B9CPfrlajTpInx7BG2OVnDmgY/K46W+DUNPbvibvj+B7COWkei7w6eyCyJI5H7R0Y7kD7HqFUTERFUEREBR46NaO2+y2Iee4YLzycdh2H2UhEEDV69i1V8iu7YZMtL+Pg98eqjM8PV4qbIoXvEjB/iOO7cfcK4RBl6VOZmtzwWImCONkQY8DIePi556H0V1b0yCxKJ2fJsAY8xgHI7OHQj7qS+tE+wydzfmMGA7PouqkFfT0wU7JkjeNrmgOG3k4/4VgiKgiIgIiICIiAiIgIiICIiAiIg/9k=",
   "r26": "data:image/jpeg;base64,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",
@@ -133,6 +132,11 @@ const IMAGES = {
 // on the table that day. March keeps March's, and the new stock starts from the
 // day it goes out. Sales carry their own snapshot as well, so a record survives
 // even when its item is long gone.
+// The catalog belongs to a market day, not to the app. Stock turns over between
+// markets and prices move, so a day is read through the shelf that was actually
+// on the table that day. March keeps March's, and the stock bought since starts
+// from when it arrived. Sales carry their own snapshot as well, so a record
+// survives even when its item is long gone.
 const CATALOGS = [
   { from: "2026-03-21", items: [
     { id: "h1", name: "GENTLE GARGAR", category: "Hats", price: 40, cost: 23.07 },
@@ -209,7 +213,7 @@ const CATALOGS = [
     { id: "br5", name: "Bracelet (5)", category: "Bracelets", price: 15, cost: 3.32 },
     { id: "br6", name: "Bracelet (6)", category: "Bracelets", price: 25, cost: 13.62 },
   ] },
-  { from: "2026-08-29", items: [
+  { from: "2026-08-01", items: [
     { id: "h3", name: "BLINDNOPLAN 25SS", category: "Hats", price: 40, qty: 1, cost: 32.46 },
     { id: "h5", name: "逃跑乐园 (2)", category: "Hats", price: 40, qty: 1, cost: 33.19 },
     { id: "h7", name: "SAUCE GUYS CLUB", category: "Hats", price: 35, qty: 1, cost: 20.58 },
@@ -230,16 +234,6 @@ const CATALOGS = [
     { id: "h25", name: "OCTO VITA", category: "Hats", price: 30, qty: 1, cost: 13.33 },
     { id: "h26", name: "黑眼豆豆zhou", category: "Hats", price: 30, qty: 1, cost: 3.04 },
     { id: "h27", name: "HEADACHE头痛", category: "Hats", price: 30, qty: 1, cost: 6.91 },
-    { id: "b1", name: "MBSQHNA", category: "Bags", price: 20, qty: 1, cost: 5.46 },
-    { id: "b2", name: "弥与弥乐 (1)", category: "Bags", price: 30, qty: 1, cost: 12.97 },
-    { id: "b3", name: "弥与弥乐 (2)", category: "Bags", price: 30, qty: 1, cost: 11.57 },
-    { id: "b4", name: "NOIR", category: "Bags", price: 25, qty: 1, cost: 5.48 },
-    { id: "b5", name: "3me", category: "Bags", price: 60, qty: 1, cost: 28.7 },
-    { id: "b6", name: "喜番里HiFani (1)", category: "Bags", price: 40, qty: 1, cost: 10 },
-    { id: "b7", name: "喜番里HiFani (2)", category: "Bags", price: null, qty: 1, cost: 4.2 },
-    { id: "b8", name: "BIG创意", category: "Bags", price: 25, qty: 1, cost: 5.22 },
-    { id: "b9", name: "SANNE (1)", category: "Bags", price: 35, qty: 1, cost: 10 },
-    { id: "b10", name: "SANNE (2)", category: "Bags", price: 35, qty: 1, cost: 10 },
     { id: "b11", name: "DEAD END KIDS", category: "Bags", price: 30, qty: 1, cost: 19.42 },
     { id: "b12", name: "PUT OUT", category: "Bags", price: 30, qty: 1, cost: 18.26 },
     { id: "b13", name: "Oogreenapple", category: "Bags", price: 25, qty: 1, cost: 9.72 },
@@ -249,17 +243,10 @@ const CATALOGS = [
     { id: "b17", name: "Oogreenapple (3)", category: "Bags", price: 30, qty: 1, cost: 12.19 },
     { id: "b18", name: "Oogreenapple (4)", category: "Bags", price: 25, qty: 1, cost: 10.96 },
     { id: "b19", name: "Oogreenapple (5)", category: "Bags", price: 25, qty: 1, cost: 10.96 },
-    { id: "c2", name: "Q版大叔", category: "Charms", price: 20, qty: 1, cost: 10 },
     { id: "c3", name: "MYTIMELAB dog", category: "Charms", price: 20, qty: 1, cost: 12.9 },
     { id: "c4", name: "江南先生 mosquito bag", category: "Charms", price: 20, qty: 1, cost: 5.65 },
     { id: "c5", name: "江南先生 game console", category: "Charms", price: 20, qty: 1, cost: 7.1 },
     { id: "c7", name: "Studio1till8", category: "Charms", price: 15, qty: 1, cost: 9 },
-    { id: "c9", name: "水果CAR keychain", category: "Charms", price: 10, qty: 1, cost: 3.46 },
-    { id: "c10", name: "水果CAR mini (1)", category: "Charms", price: 10, qty: 2, addon: 5, cost: 1.58 },
-    { id: "c11", name: "水果CAR mini (2)", category: "Charms", price: 10, qty: 2, addon: 5, cost: 1.43 },
-    { id: "c12", name: "尤妮客", category: "Charms", price: 10, qty: 1, cost: 1.96 },
-    { id: "c13", name: "老猪哥", category: "Charms", price: 10, qty: 1, cost: 2.35 },
-    { id: "c14", name: "charm (unnamed)", category: "Charms", price: 10, qty: 2, cost: 1.39 },
     { id: "c15", name: "Antiphase铆兔", category: "Charms", price: 20, qty: 2, cost: 7.88 },
     { id: "c16", name: "Antiphase铆兔 (2)", category: "Charms", price: 20, qty: 2, cost: 8.38 },
     { id: "c17", name: "WACKYE", category: "Charms", price: 20, qty: 1, cost: 8.49 },
@@ -275,13 +262,6 @@ const CATALOGS = [
     { id: "c27", name: "Heza禾致", category: "Charms", price: 15, qty: 3, cost: 4.42 },
     { id: "c28", name: "Purple youuu", category: "Charms", price: 10, qty: 2, cost: 3.19 },
     { id: "c29", name: "江南先生NewJNXS", category: "Charms", price: 10, qty: 1, cost: 5.65 },
-    { id: "c30", name: "Lucky star 数码", category: "Charms", price: 10, qty: 10, cost: 0.98 },
-    { id: "bt1", name: "柳吴伟 leopard belt", category: "Belts", price: 15, qty: 1, cost: 2.88 },
-    { id: "bt2", name: "Belt (2)", category: "Belts", price: 18, qty: 1, cost: 5.36 },
-    { id: "bt3", name: "Belt (3)", category: "Belts", price: 25, qty: 1, cost: 5.1 },
-    { id: "bt4", name: "Belt (4)", category: "Belts", price: 18, qty: 1, cost: 5.65 },
-    { id: "bt5", name: "Belt (5)", category: "Belts", price: 15, qty: 1, cost: 3.9 },
-    { id: "bt6", name: "Belt (6)", category: "Belts", price: 25, qty: 1, cost: 4.33 },
     { id: "r1", name: "Ring set A (1)", category: "Rings", price: 15, qty: 1, cost: 3.75 },
     { id: "r2", name: "Ring set A (2)", category: "Rings", price: 15, qty: 1, cost: 5.64 },
     { id: "r4", name: "Ring B", category: "Rings", price: 15, qty: 1, cost: 2.26 },
@@ -827,6 +807,12 @@ export default function App() {
   // A sealed day is an archive. The server refuses every write to it, so the
   // app hides the ways in rather than letting a tap fail silently.
   const sealed = sealedDays.includes(market);
+
+  // The August stock has no belts, and an empty tab at a stall is a tap that
+  // goes nowhere. Only what the day's shelf actually holds is offered.
+  const dayCategories = useMemo(
+    () => ["All", ...CATEGORIES.filter(c => c !== "All" && catalog.some(i => i.category === c))],
+    [catalog]);
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { unsentCountRef.current = dirty.size; }, [dirty]);
@@ -1103,6 +1089,11 @@ export default function App() {
   // Scoped to the market day that is loaded, never a running total.
   const stats = tab === "numbers" ? computeStats(visible, catalog) : null;
 
+  useEffect(() => {
+    if (!dayCategories.includes(catFilter)) setCatFilter("All");
+    if (!dayCategories.includes(pickerCat)) setPickerCat("All");
+  }, [dayCategories, catFilter, pickerCat]);
+
   const unsentCount = dirty.size;
   // Today wins if the calendar has moved on. Otherwise, if another phone has
   // already opened a later day, follow that one.
@@ -1168,6 +1159,19 @@ export default function App() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.error || "the server said no");
     return data;
+  };
+
+  // Picking a date moves this phone to it and tells the server the day exists,
+  // so the other phone sees it coming rather than only once someone counts.
+  const startDay = (day) => {
+    switchToDay(day);
+    const { syncUrl: url, stallKey: stall } = cfgRef.current;
+    if (!url || !stall) return;
+    fetch(syncBase(url) + "/open?stall=" + encodeURIComponent(stall) +
+      "&market=" + encodeURIComponent(day), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      signal: timeoutSignal(SYNC_TIMEOUT),
+    }).catch(() => { /* it will exist as soon as anyone counts into it */ });
   };
 
   const setDaySeal = async (on) => {
@@ -1389,7 +1393,7 @@ export default function App() {
             </div>
             <div style={S.rule} />
             <div style={S.catRow}>
-              {CATEGORIES.map(c => (
+              {dayCategories.map(c => (
                 <button key={c} style={pickerCat === c ? S.catActive : S.catBtn} onClick={() => setPickerCat(c)}>{c}</button>
               ))}
             </div>
@@ -1464,7 +1468,7 @@ export default function App() {
                   <div style={S.rule} />
                   <label style={S.label}>Another day</label>
                   <input style={S.modalInput} type="date" value=""
-                    onChange={ev => { if (ev.target.value) { switchToDay(ev.target.value); setDayPicker(null); } }} />
+                    onChange={ev => { if (ev.target.value) { startDay(ev.target.value); setDayPicker(null); } }} />
                   <p style={S.hint}>Any date, including one that has not arrived. Counting into a day
                     is what creates it, so a market can be set up the night before.</p>
                 </>
@@ -1719,7 +1723,7 @@ export default function App() {
         </div>
       ) : (
         <div style={S.content}>
-          <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} soldOutIds={soldOutIds}
+          <PriceCheck search={search} setSearch={setSearch} catFilter={catFilter} setCatFilter={setCatFilter} grouped={grouped} soldOutIds={soldOutIds} categories={dayCategories}
             onPhoto={id => setPhoto({ id, mode: "look" })} />
         </div>
       )}
@@ -1952,7 +1956,7 @@ function Numbers({ stats, market }) {
   );
 }
 
-function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldOutIds, onPhoto }) {
+function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldOutIds, onPhoto, categories }) {
   const ref = useRef(null);
   return (
     <div style={S.priceWrap}>
@@ -1963,7 +1967,7 @@ function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldO
       </div>
       <div style={S.rule} />
       <div style={S.catRow}>
-        {CATEGORIES.map(c => (
+        {categories.map(c => (
           <button key={c} style={catFilter === c ? S.catActive : S.catBtn} onClick={() => setCatFilter(c)}>{c}</button>
         ))}
       </div>
