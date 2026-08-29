@@ -15,6 +15,7 @@ POST /sync?stall=<key>&market=<day>&since=<cursor>   -> { cursor, rows }
 GET  /markets?stall=<key>                            -> every day, with counts
 GET  /export?stall=<key>&market=<day>&format=csv     -> that day as a file
 GET  /export?stall=<key>&market=<day>&format=json    -> the same, as JSON
+POST /open?stall=<key>&market=<day>                  -> set a day up before it happens
 POST /seal?stall=<key>&market=<day>                  -> finish a day, or reopen it
      body: { sealed: true | false }
 POST /erase?stall=<key>&market=<day>                 -> remove a day and its entries
