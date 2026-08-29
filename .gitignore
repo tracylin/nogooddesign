@@ -24,5 +24,8 @@ dist-ssr
 *.sw?
 
 # Real market days used to check the numbers locally. This repo is public,
-# so the shop's takings stay off it.
+# so the shop's takings stay off it. The stats suite skips them when absent.
 test/fixtures/
+
+# Built copy served to the browser test runner. Never part of the repo.
+.e2e-dist/
