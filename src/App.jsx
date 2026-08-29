@@ -787,6 +787,7 @@ export default function App() {
   const [showCatalogPicker, setShowCatalogPicker] = useState(null);
   const [pickerCat, setPickerCat] = useState("All");
   const [photo, setPhoto] = useState(null);
+  const [dayPicker, setDayPicker] = useState(null);
   const [photoQty, setPhotoQty] = useState(1);
   const [syncStatus, setSyncStatus] = useState("");
   const [syncError, setSyncError] = useState("");
@@ -1094,8 +1095,33 @@ export default function App() {
   const suggestedDay = today > market ? today : (laterOnServer || null);
   const suggestedReason = today > market ? "It is a new day" : "Another phone has started";
 
+  // The day box in the header is the obvious place to reach for, so it opens
+  // the list rather than only reporting which day is loaded.
+  const openDayPicker = async () => {
+    setDayPicker("loading");
+    const days = await fetchDays();
+    setDayPicker(days);
+  };
+
+  const dayOptions = () => {
+    const counts = new Map();
+    (Array.isArray(dayPicker) ? dayPicker : []).forEach(d => counts.set(d.market, d.entries));
+    // The day being counted into and today always appear, even before either
+    // has reached the server.
+    [market, todayMarket()].forEach(d => { if (!counts.has(d)) counts.set(d, null); });
+    return [...counts.entries()]
+      .map(([day, entries]) => ({ market: day, entries }))
+      .sort((x, y) => y.market.localeCompare(x.market));
+  };
+
+  // This replaces everything the sheet holds with the day open on this phone.
+  // It is how a good record gets overwritten by a phone that was missing rows,
+  // so it asks first and names the day it is about to write.
   const exportToSheet = async () => {
     if (!deployId) return;
+    if (!confirm("Overwrite the Google Sheet with " + market + ", " + visible.length +
+                 " on this phone?\n\nThe sheet keeps one day at a time. Whatever is in it now is replaced, " +
+                 "including any earlier market. The server keeps every day and is the real backup.")) return;
     setSyncStatus("exporting…");
     const result = await pushState(deployId, visible);
     setSyncStatus(result.ok ? (result.confirmed ? "exported" : "sent") : "export failed");
@@ -1305,7 +1331,7 @@ export default function App() {
                       setPhoto({ id: item.id, mode: isSoldByOther ? "look" : "pick", uid: showCatalogPicker });
                     }}>
                       {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : <div style={S.thumbFallback}>?</div>}
-                      <span style={S.thumbHint}>\u2922</span>
+                      <span style={S.thumbHint}>⤢</span>
                     </div>
                     <span style={S.pickerName}>{item.name}</span>
                     <span style={S.pickerPrice}>{item.price ? `$${item.price}` : "—"}</span>
@@ -1314,6 +1340,43 @@ export default function App() {
               })}
             </div>
             <button style={S.pickerDoneBtn} onClick={() => { setShowCatalogPicker(null); setPickerCat("All"); }}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {/* MARKET DAY */}
+      {dayPicker !== null && (
+        <div style={S.overlay} onClick={() => setDayPicker(null)}>
+          <div style={S.pickerModal} onClick={ev => ev.stopPropagation()}>
+            <div style={S.pickerHead}>
+              <span style={S.pickerTitle}>Which market day?</span>
+              <button style={S.closeBtn} onClick={() => setDayPicker(null)}>✕</button>
+            </div>
+            <div style={S.rule} />
+            <div style={S.dayList}>
+              {dayPicker === "loading" && <div style={S.empty}>Looking…</div>}
+              {Array.isArray(dayPicker) && dayOptions().map(day => (
+                <div key={day.market} style={S.historyRow}>
+                  <button
+                    style={day.market === market ? S.historyOpenCurrent : S.historyOpen}
+                    onClick={() => { switchToDay(day.market); setDayPicker(null); }}
+                    disabled={day.market === market}>
+                    <span style={S.historyDay}>
+                      {day.market}{day.market === todayMarket() ? " · today" : ""}
+                    </span>
+                    <span style={S.historyCount}>
+                      {day.market === market ? "open"
+                        : day.entries == null ? "not started"
+                        : day.entries + (day.entries === 1 ? " entry" : " entries")}
+                    </span>
+                  </button>
+                </div>
+              ))}
+              {Array.isArray(dayPicker) && dayPicker.length === 0 && (
+                <p style={S.hint}>No days came back from the server. Switching still works, but that day
+                  will stay empty until there is signal.</p>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -1339,7 +1402,7 @@ export default function App() {
                 <>
                   {stock > 1 && <div style={S.photoStock}>{stock} in stock</div>}
                   <div style={S.qtyRow}>
-                    <button style={S.qtyBtn} onClick={() => setPhotoQty(q => Math.max(1, q - 1))}>\u2212</button>
+                    <button style={S.qtyBtn} onClick={() => setPhotoQty(q => Math.max(1, q - 1))}>−</button>
                     <span style={S.qtyNum}>{photoQty}</span>
                     <button style={S.qtyBtn} onClick={() => setPhotoQty(q => Math.min(stock, q + 1))}>+</button>
                   </div>
@@ -1489,7 +1552,9 @@ export default function App() {
       <div style={S.header}>
         <span style={S.logo}>NO GOOD DESIGN CO.</span>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {market !== todayMarket() && <span style={S.dayBadge}>{market}</span>}
+          <button
+            style={market === todayMarket() ? S.dayBadgeBtn : S.dayBadgeBtnPast}
+            onClick={openDayPicker}>{market}</button>
           {syncStatus
             ? <span style={S.syncBadge}>{syncStatus}</span>
             : syncConfigured && syncError
@@ -1801,7 +1866,7 @@ function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldO
                 <div key={item.id} style={S.catItem}>
                   <div style={S.thumbTap} onClick={() => onPhoto(item.id)}>
                     {IMAGES[item.id] ? <img src={IMAGES[item.id]} style={S.thumbImg} alt="" /> : <div style={S.thumbFallback}>?</div>}
-                    <span style={S.thumbHint}>\u2922</span>
+                    <span style={S.thumbHint}>⤢</span>
                   </div>
                   <div style={S.catItemInfo}>
                     <span style={{ ...S.catItemName, textDecoration: sold ? "line-through" : "none" }}>
@@ -1859,7 +1924,9 @@ const S = {
   historyDay: { fontSize: 12, fontFamily: SANS, color: BK, textDecoration: "underline", textUnderlineOffset: 2 },
   historyCount: { fontSize: 11, color: "#a09a92", whiteSpace: "nowrap" },
   historyLink: { fontSize: 11, color: BK, textDecoration: "underline", padding: "2px 0" },
-  dayBadge: { fontSize: 10, color: BK, border: `1px solid ${BK}`, padding: "1px 5px", letterSpacing: "0.02em" },
+  dayList: { padding: "6px 20px 18px", overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y" },
+  dayBadgeBtn: { fontFamily: SANS, fontSize: 10, color: "#a09a92", background: "none", border: `1px solid #a09a92`, padding: "2px 6px", letterSpacing: "0.02em", cursor: "pointer" },
+  dayBadgeBtnPast: { fontFamily: SANS, fontSize: 10, color: BG, background: BK, border: `1px solid ${BK}`, padding: "2px 6px", letterSpacing: "0.02em", cursor: "pointer" },
   gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   rule: { height: 1, background: BK, flexShrink: 0 },
   nav: { display: "flex", flexShrink: 0 },
