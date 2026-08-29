@@ -163,7 +163,25 @@ if (existsSync(fixture)) {
     m.payments.find(p => p.label === "Venmo")?.count === 3 &&
     m.payments.find(p => p.label === "Cash")?.count === 1 &&
     m.payments.find(p => p.label === "not recorded")?.count === 8, m.payments);
-  check("profit is unknown until the inventory carries costs", m.profit.known === 0, m.profit);
+  check("profit is unknown when the numbers are asked without a catalog", m.profit.known === 0, m.profit);
+
+  // The same day read through the real catalog, which now carries a cost per
+  // item. These sales kept no snapshot, so they resolve through the catalog and
+  // the profit is worked out for the first time here.
+  const appSrc = readFileSync(join(here, "..", "src", "App.jsx"), "utf8");
+  const catBlock = appSrc.slice(appSrc.indexOf("const CATALOG = ["), appSrc.indexOf("];", appSrc.indexOf("const CATALOG = [")) + 2);
+  const CATALOG = new Function(catBlock + "; return CATALOG;")();
+  check("every item in the catalog carries a cost",
+    CATALOG.length === 73 && CATALOG.every(c => typeof c.cost === "number"),
+    CATALOG.filter(c => typeof c.cost !== "number").map(c => c.id));
+  const withCost = computeStats(rows, CATALOG);
+  check("eleven of the twelve sales can be costed", withCost.profit.known === 11, withCost.profit);
+  check("cost of goods is $115.38, the same figure the shop wrote down",
+    withCost.profit.cost === 115.38, withCost.profit.cost);
+  check("profit is $173.62", withCost.profit.amount === 173.62, withCost.profit.amount);
+  check("margin is 60%", Math.round(withCost.profit.margin * 100) === 60, withCost.profit.margin);
+  check("the water bottle stays out of it, having no item and so no cost",
+    withCost.profit.revenue === 289 && withCost.revenue === 291, [withCost.profit.revenue, withCost.revenue]);
 } else {
   console.log("  skip fixture, test/fixtures/march-day.json not present");
 }
