@@ -49,7 +49,7 @@ for (const [label, viewport] of [["iPhone SE", { width: 375, height: 667 }],
 
   // Everything in it must actually be reachable, not just present in the markup.
   const controls = ["Sync now", "Copy setup link", "Save as CSV", "Save as JSON",
-                    "Restore from file", "Show days", "Send today to sheet", "Clear local"];
+                    "Restore from file", "Clear this phone"];
   const unreachable = [];
   for (const name of controls) {
     const ok = await page.getByRole("button", { name, exact: true }).first()

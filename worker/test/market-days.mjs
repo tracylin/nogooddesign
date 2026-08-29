@@ -147,8 +147,8 @@ check("each day numbers from 1",
 console.log("\n4d. A past day can be opened by tapping it in the list");
 // Downloading a day is not the same as looking at it. Tapping the day is what
 // anyone tries first, so that has to be the thing that opens it.
-await openSettings(B);
-await B.page.getByRole("button", { name: "Show days" }).click();
+// The day box in the header is where days live now. Settings no longer lists them.
+await B.page.getByRole("button", { name: /^\d{4}-\d{2}-\d{2}$/ }).first().click();
 await B.page.waitForTimeout(1500);
 const dayButton = B.page.getByRole("button", { name: new RegExp(YESTERDAY) }).first();
 check("the past day is listed as something tappable",
@@ -156,8 +156,8 @@ check("the past day is listed as something tappable",
 await dayButton.click();
 caught = await waitFor(B, st => st.market === YESTERDAY && st.live.length === 1, 12000);
 check("tapping it opens that day", caught !== null, caught === null ? await state(B) : caught + "ms");
-check("and the panel gets out of the way",
-  !(await B.page.getByText("Sync address", { exact: false }).first().isVisible().catch(() => false)));
+check("and the list gets out of the way",
+  !(await B.page.getByText("Which market day?", { exact: false }).first().isVisible().catch(() => false)));
 check("the counter shows that day's customer",
   await B.page.getByText("#1", { exact: false }).first().isVisible().catch(() => false));
 

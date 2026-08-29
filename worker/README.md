@@ -101,13 +101,16 @@ npx wrangler deploy
 
 ## Backups
 
-Three ways out, so a day's takings never depend on one service still existing.
+Two ways out, so a day's takings never depend on one service still existing.
 
-- **Settings → Save today as CSV.** Built on the phone from what it already has,
-  so it works with no signal at all.
-- **Settings → Past market days.** Every day held on the server, each with a CSV
-  and a JSON download.
-- **Settings → Send today to sheet.** The original Google Sheet export.
+- **Settings → Save as CSV or JSON.** Built on the phone from what it already
+  has, so it works with no signal at all. JSON is the one that restores.
+- **The day box in the header.** Every day held on the server, each with a CSV
+  and a JSON download beside it.
+
+The Google Sheet export was removed in August 2026. It sent one day as the
+sheet's entire state, which is almost certainly how the March record lost eleven
+of its hundred rows.
 
 Both CSV paths write the same columns and lead with a byte order mark, so Excel
 does not mangle the Chinese item names.
