@@ -684,6 +684,7 @@ async function syncWithWorker({ url, stall, market, since, rows }) {
       ok: true,
       cursor: Number(data.cursor) || 0,
       rows: Array.isArray(data.rows) ? data.rows : [],
+      sealed: data.sealed || null,
     };
   } catch (e) {
     return { ok: false, error: e.message || "no connection" };
@@ -807,6 +808,7 @@ export default function App() {
   // Every day the server holds, so this phone can notice that another one has
   // already started a new market.
   const [serverDays, setServerDays] = useState([]);
+  const [sealedDays, setSealedDays] = useState([]);
   const fileInput = useRef(null);
   const entriesRef = useRef(entries);
   const dirtyRef = useRef(dirty);
@@ -821,6 +823,10 @@ export default function App() {
   // The shelf for the day being looked at. Opening March shows March's stock and
   // March's prices, not what is on the table now.
   const catalog = catalogFor(market);
+
+  // A sealed day is an archive. The server refuses every write to it, so the
+  // app hides the ways in rather than letting a tap fail silently.
+  const sealed = sealedDays.includes(market);
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   useEffect(() => { unsentCountRef.current = dirty.size; }, [dirty]);
@@ -891,6 +897,16 @@ export default function App() {
         setSyncError(result.error);
         setSyncStatus("");
         return;
+      }
+
+      // The server is the one that decides, and it says so on every reply.
+      if (result.sealed !== undefined) {
+        setSealedDays(prev => {
+          const has = prev.includes(day);
+          if (result.sealed && !has) return [...prev, day];
+          if (!result.sealed && has) return prev.filter(d => d !== day);
+          return prev;
+        });
       }
 
       try { localStorage.setItem(cursorKey(stall, day), String(result.cursor)); } catch { /* storage unavailable, carry on */ }
@@ -1104,14 +1120,15 @@ export default function App() {
   };
 
   const dayOptions = () => {
-    const counts = new Map();
-    (Array.isArray(dayPicker) ? dayPicker : []).forEach(d => counts.set(d.market, d.entries));
+    const byDay = new Map();
+    (Array.isArray(dayPicker) ? dayPicker : []).forEach(d =>
+      byDay.set(d.market, { market: d.market, entries: d.entries, sealed: d.sealed || null }));
     // The day being counted into and today always appear, even before either
     // has reached the server.
-    [market, todayMarket()].forEach(d => { if (!counts.has(d)) counts.set(d, null); });
-    return [...counts.entries()]
-      .map(([day, entries]) => ({ market: day, entries }))
-      .sort((x, y) => y.market.localeCompare(x.market));
+    [market, todayMarket()].forEach(d => {
+      if (!byDay.has(d)) byDay.set(d, { market: d, entries: null, sealed: sealedDays.includes(d) ? true : null });
+    });
+    return [...byDay.values()].sort((x, y) => y.market.localeCompare(x.market));
   };
 
   // This replaces everything the sheet holds with the day open on this phone.
@@ -1141,6 +1158,62 @@ export default function App() {
     setTimeout(() => setSyncStatus(""), 2500);
   };
 
+  const dayAction = async (path, body) => {
+    const { syncUrl: url, stallKey: stall } = cfgRef.current;
+    const res = await fetch(syncBase(url) + path + "?stall=" + encodeURIComponent(stall) +
+      "&market=" + encodeURIComponent(market), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body), signal: timeoutSignal(SYNC_TIMEOUT),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || "the server said no");
+    return data;
+  };
+
+  const setDaySeal = async (on) => {
+    if (!syncConfigured) return;
+    if (on && !confirm("Seal " + market + "?\n\nNothing can be added or changed on it, on this phone or " +
+                       "the other one, until it is unsealed. Downloads still work.")) return;
+    if (!on && !confirm("Unseal " + market + "? It can be changed again after this.")) return;
+    setSyncStatus(on ? "sealing…" : "unsealing…");
+    try {
+      await dayAction("/seal", { sealed: on });
+      setSealedDays(prev => (on ? [...new Set([...prev, market])] : prev.filter(d => d !== market)));
+      setSyncError("");
+      setSyncStatus(on ? "sealed" : "unsealed");
+    } catch (e) {
+      setSyncError(e.message || "could not reach the server");
+      setSyncStatus("");
+    }
+    setTimeout(() => setSyncStatus(""), 2500);
+  };
+
+  const eraseDay = async () => {
+    if (!syncConfigured) return;
+    if (sealed) { alert(market + " is sealed. Unseal it first if you really mean to delete it."); return; }
+    const typed = prompt("Delete " + market + " and everything counted on it?\n\n" +
+      "This cannot be undone and it removes the day for both phones. " +
+      "Type the date to confirm.");
+    if (typed === null) return;
+    if (typed.trim() !== market) { alert("That did not match, so nothing was deleted."); return; }
+    setSyncStatus("deleting…");
+    try {
+      const data = await dayAction("/erase", { confirm: market });
+      try { localStorage.removeItem(cursorKey(stallKey, market)); } catch { /* storage unavailable, carry on */ }
+      setEntries([]);
+      setDirty(new Set());
+      setExpandedUid(null);
+      setHistory(null);
+      setSealedDays(prev => prev.filter(d => d !== market));
+      setSyncError("");
+      setSyncStatus("deleted " + data.removed);
+    } catch (e) {
+      setSyncError(e.message || "could not reach the server");
+      setSyncStatus("");
+    }
+    setTimeout(() => setSyncStatus(""), 3000);
+  };
+
   const exportUrl = (day, format) =>
     syncBase(syncUrl) + "/export?stall=" + encodeURIComponent(stallKey) +
     "&market=" + encodeURIComponent(day) + "&format=" + format;
@@ -1163,7 +1236,16 @@ export default function App() {
   useEffect(() => {
     if (!syncConfigured) return;
     let alive = true;
-    const look = () => fetchDays().then(days => { if (alive) setServerDays(days.map(d => d.market)); });
+    const look = () => fetchDays().then(days => {
+      if (!alive) return;
+      setServerDays(days.map(d => d.market));
+      setSealedDays(prev => {
+        const known = new Set(days.map(d => d.market));
+        // A day nobody has counted into yet is not in the list, so what is
+        // already known about it is kept rather than dropped.
+        return [...days.filter(d => d.sealed).map(d => d.market), ...prev.filter(d => !known.has(d))];
+      });
+    });
     const first = setTimeout(look, 1500);
     const timer = setInterval(look, 5 * 60 * 1000);
     return () => { alive = false; clearTimeout(first); clearInterval(timer); };
@@ -1365,9 +1447,10 @@ export default function App() {
                       {day.market}{day.market === todayMarket() ? " · today" : ""}
                     </span>
                     <span style={S.historyCount}>
-                      {day.market === market ? "open"
-                        : day.entries == null ? "not started"
-                        : day.entries + (day.entries === 1 ? " entry" : " entries")}
+                      {(day.sealed ? "sealed · " : "") +
+                        (day.market === market ? "open"
+                          : day.entries == null ? "not started"
+                          : day.entries + (day.entries === 1 ? " entry" : " entries"))}
                     </span>
                   </button>
                 </div>
@@ -1375,6 +1458,16 @@ export default function App() {
               {Array.isArray(dayPicker) && dayPicker.length === 0 && (
                 <p style={S.hint}>No days came back from the server. Switching still works, but that day
                   will stay empty until there is signal.</p>
+              )}
+              {Array.isArray(dayPicker) && (
+                <>
+                  <div style={S.rule} />
+                  <label style={S.label}>Another day</label>
+                  <input style={S.modalInput} type="date" value=""
+                    onChange={ev => { if (ev.target.value) { switchToDay(ev.target.value); setDayPicker(null); } }} />
+                  <p style={S.hint}>Any date, including one that has not arrived. Counting into a day
+                    is what creates it, so a market can be set up the night before.</p>
+                </>
               )}
             </div>
           </div>
@@ -1540,6 +1633,20 @@ export default function App() {
             </div>
 
             <div style={S.rule} />
+            <label style={S.label}>This market day</label>
+            <div style={S.modalBtnRow}>
+              <button style={S.modalBtn} onClick={() => setDaySeal(!sealed)} disabled={!syncConfigured}>
+                {sealed ? "Unseal " + market : "Seal " + market}
+              </button>
+              <button style={S.modalBtn} onClick={eraseDay} disabled={!syncConfigured || sealed}>Delete day</button>
+            </div>
+            <p style={S.hint}>
+              {sealed
+                ? "Sealed. The server refuses every change to this day, from either phone. Downloads still work."
+                : "Sealing finishes a day: it becomes an archive that neither phone can change. Deleting removes it and everything counted on it, for good, and is refused once a day is sealed."}
+            </p>
+
+            <div style={S.rule} />
             <div style={S.modalBtnRow}>
               <button style={S.modalBtn} onClick={clearData}>Clear local</button>
             </div>
@@ -1551,16 +1658,17 @@ export default function App() {
       {/* HEADER */}
       <div style={S.header}>
         <span style={S.logo}>NO GOOD DESIGN CO.</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <button
             style={market === todayMarket() ? S.dayBadgeBtn : S.dayBadgeBtnPast}
             onClick={openDayPicker}>{market}</button>
+          {sealed && <span style={S.sealedBadge}>sealed</span>}
           {syncStatus
             ? <span style={S.syncBadge}>{syncStatus}</span>
             : syncConfigured && syncError
               ? <span style={S.syncBadge}>{unsentCount > 0 ? "offline \u00b7 " + unsentCount : "offline"}</span>
               : null}
-          {boughtCount > 0 && <span style={S.headerStat}>{boughtCount} sold · ${totalRevenue}</span>}
+          {!sealed && boughtCount > 0 && <span style={S.headerStat}>{boughtCount} sold · ${totalRevenue}</span>}
           <button style={S.gearBtn} onClick={() => setShowSettings(true)}><GearIcon /></button>
         </div>
       </div>
@@ -1581,10 +1689,16 @@ export default function App() {
           )}
           <div style={S.counterArea}>
             <div style={S.bigNum}>{totalCount}</div>
-            <div style={S.btnRow}>
-              <button style={S.roundBtn} onClick={addEntry}><span style={S.btnSymbol}>✲</span></button>
-            </div>
-            <button style={S.undoBtn} onClick={undoEntry}>undo</button>
+            {sealed ? (
+              <div style={S.sealedNote}>This market is finished and sealed. Nothing can be changed on it.</div>
+            ) : (
+              <>
+                <div style={S.btnRow}>
+                  <button style={S.roundBtn} onClick={addEntry}><span style={S.btnSymbol}>✲</span></button>
+                </div>
+                <button style={S.undoBtn} onClick={undoEntry}>undo</button>
+              </>
+            )}
           </div>
           <div style={S.rule} />
           <div style={S.feed}>
@@ -1594,7 +1708,7 @@ export default function App() {
                 <ExpandedEntry key={entry.uid} entry={entry} onUpdate={updateEntry}
                   onDone={() => saveAndCollapse(entry.uid)} onDelete={() => deleteEntry(entry.uid)} onPickCatalog={() => setShowCatalogPicker(entry.uid)} />
               ) : (
-                <CollapsedEntry key={entry.uid} entry={entry} onTap={() => setExpandedUid(entry.uid)} />
+                <CollapsedEntry key={entry.uid} entry={entry} onTap={() => !sealed && setExpandedUid(entry.uid)} />
               )
             ))}
           </div>
@@ -1902,7 +2016,7 @@ const S = {
     WebkitFontSmoothing: "antialiased", position: "relative",
   },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px" },
-  logo: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: BK, letterSpacing: "0.12em", textTransform: "uppercase" },
+  logo: { fontFamily: SANS, fontSize: 11, fontWeight: 500, color: BK, letterSpacing: "0.12em", textTransform: "uppercase", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 },
   headerStat: { fontFamily: SANS, fontSize: 11, color: BK },
   syncBadge: { fontSize: 10, color: BK },
   dayPrompt: { display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${BK}`, background: "#e3ded4" },
@@ -1924,9 +2038,11 @@ const S = {
   historyDay: { fontSize: 12, fontFamily: SANS, color: BK, textDecoration: "underline", textUnderlineOffset: 2 },
   historyCount: { fontSize: 11, color: "#a09a92", whiteSpace: "nowrap" },
   historyLink: { fontSize: 11, color: BK, textDecoration: "underline", padding: "2px 0" },
+  sealedNote: { fontFamily: SANS, fontSize: 11.5, color: "#a09a92", textAlign: "center", lineHeight: 1.45, maxWidth: 260, marginTop: 4 },
+  sealedBadge: { fontFamily: SANS, fontSize: 10, color: BG, background: BK, padding: "2px 6px", letterSpacing: "0.06em", textTransform: "uppercase" },
   dayList: { padding: "6px 20px 18px", overflowY: "auto", WebkitOverflowScrolling: "touch", touchAction: "pan-y" },
-  dayBadgeBtn: { fontFamily: SANS, fontSize: 10, color: "#a09a92", background: "none", border: `1px solid #a09a92`, padding: "2px 6px", letterSpacing: "0.02em", cursor: "pointer" },
-  dayBadgeBtnPast: { fontFamily: SANS, fontSize: 10, color: BG, background: BK, border: `1px solid ${BK}`, padding: "2px 6px", letterSpacing: "0.02em", cursor: "pointer" },
+  dayBadgeBtn: { fontFamily: SANS, fontSize: 10, color: "#a09a92", background: "none", border: `1px solid #a09a92`, padding: "2px 6px", letterSpacing: "0.02em", whiteSpace: "nowrap", cursor: "pointer" },
+  dayBadgeBtnPast: { fontFamily: SANS, fontSize: 10, color: BG, background: BK, border: `1px solid ${BK}`, padding: "2px 6px", letterSpacing: "0.02em", whiteSpace: "nowrap", cursor: "pointer" },
   gearBtn: { background: "none", border: "none", cursor: "pointer", padding: 4, display: "flex", alignItems: "center" },
   rule: { height: 1, background: BK, flexShrink: 0 },
   nav: { display: "flex", flexShrink: 0 },

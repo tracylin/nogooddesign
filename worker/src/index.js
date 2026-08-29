@@ -161,6 +161,10 @@ function ensureSchema(db) {
       // no IF NOT EXISTS for a column, so a second run simply errors and that
       // is fine.
       .then(() => db.prepare("ALTER TABLE entries ADD COLUMN field_ts TEXT").run().catch(() => {}))
+      // A finished market can be sealed, after which the server refuses every
+      // write to it. Same reason as the column above: SQLite has no IF NOT
+      // EXISTS for a column, so a second run simply errors and that is fine.
+      .then(() => db.prepare("ALTER TABLE counters ADD COLUMN sealed_at TEXT").run().catch(() => {}))
       .catch(e => { schemaReady = null; throw e; });
   }
   return schemaReady;
@@ -297,13 +301,47 @@ const EXPORT_COLUMNS = [
   ["deleted", e => e.deletedAt || ""],
 ];
 
+// Sealing lives on the counter row, which already exists once for each stall
+// and market day.
+async function sealedAt(db, stall, market) {
+  const row = await db
+    .prepare("SELECT sealed_at FROM counters WHERE stall = ? AND market = ?")
+    .bind(stall, market)
+    .first();
+  return row && row.sealed_at ? row.sealed_at : null;
+}
+
+async function setSeal(db, stall, market, on) {
+  await db.prepare("INSERT OR IGNORE INTO counters (stall, market) VALUES (?, ?)")
+          .bind(stall, market).run();
+  const stamp = on ? new Date().toISOString() : null;
+  await db.prepare("UPDATE counters SET sealed_at = ? WHERE stall = ? AND market = ?")
+          .bind(stamp, stall, market).run();
+  return stamp;
+}
+
+// Removing a day takes its entries and its counter together, so the day is gone
+// rather than left as an empty shell that still hands out numbers.
+async function eraseMarket(db, stall, market) {
+  const before = await db
+    .prepare("SELECT COUNT(*) AS n FROM entries WHERE stall = ? AND market = ?")
+    .bind(stall, market).first();
+  await db.batch([
+    db.prepare("DELETE FROM entries WHERE stall = ? AND market = ?").bind(stall, market),
+    db.prepare("DELETE FROM counters WHERE stall = ? AND market = ?").bind(stall, market),
+  ]);
+  return (before && before.n) || 0;
+}
+
 async function marketsFor(db, stall) {
   const { results } = await db
     .prepare(
-      "SELECT market, " +
-      "  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS entries, " +
-      "  MAX(updated_at) AS last_activity " +
-      "FROM entries WHERE stall = ? GROUP BY market ORDER BY market DESC LIMIT 400")
+      "SELECT e.market AS market, " +
+      "  COUNT(*) FILTER (WHERE e.deleted_at IS NULL) AS entries, " +
+      "  MAX(e.updated_at) AS last_activity, " +
+      "  MAX(c.sealed_at) AS sealed_at " +
+      "FROM entries e LEFT JOIN counters c ON c.stall = e.stall AND c.market = e.market " +
+      "WHERE e.stall = ? GROUP BY e.market ORDER BY e.market DESC LIMIT 400")
     .bind(stall)
     .all();
   return results || [];
@@ -341,6 +379,7 @@ export default {
         const markets = await marketsFor(env.DB, stallOnly);
         return json({ ok: true, markets: markets.map(m => ({
           market: m.market, entries: m.entries, lastActivity: m.last_activity,
+          sealed: m.sealed_at || null,
         })) });
       } catch (e) {
         return fail(e.message || "server error", 500);
@@ -384,6 +423,49 @@ export default {
       }
     }
 
+    // Finishing a market. A sealed day refuses every write from every phone,
+    // which is the point: the guarantee has to live here rather than in an app
+    // that the other phone might not have updated.
+    if (url.pathname === "/seal") {
+      const day = (url.searchParams.get("market") || "").trim();
+      if (stallOnly.length < MIN_STALL_KEY) return fail("stall key must be at least 12 characters", 400);
+      if (!day || day.length > 64) return fail("market is required", 400);
+      if (request.method !== "POST") return fail("method not allowed", 405);
+      if (!env.DB) return fail("the D1 database is not bound to this Worker", 500);
+      try {
+        await ensureSchema(env.DB);
+        let body = {};
+        try { body = await request.json(); } catch { /* an empty body means seal */ }
+        const on = body?.sealed !== false;
+        const stamp = await setSeal(env.DB, stallOnly, day, on);
+        return json({ ok: true, market: day, sealed: stamp });
+      } catch (e) {
+        return fail(e.message || "server error", 500);
+      }
+    }
+
+    // Removing a day for good. Sealing exists to stop exactly this, so a sealed
+    // day is refused, and the caller has to name the day it means.
+    if (url.pathname === "/erase") {
+      const day = (url.searchParams.get("market") || "").trim();
+      if (stallOnly.length < MIN_STALL_KEY) return fail("stall key must be at least 12 characters", 400);
+      if (!day || day.length > 64) return fail("market is required", 400);
+      if (request.method !== "POST") return fail("method not allowed", 405);
+      if (!env.DB) return fail("the D1 database is not bound to this Worker", 500);
+      try {
+        await ensureSchema(env.DB);
+        let body = {};
+        try { body = await request.json(); } catch { /* handled by the check below */ }
+        if (body?.confirm !== day) return fail("name the day being removed to confirm", 400);
+        const sealed = await sealedAt(env.DB, stallOnly, day);
+        if (sealed) return fail(day + " is sealed, so it cannot be removed", 409);
+        const removed = await eraseMarket(env.DB, stallOnly, day);
+        return json({ ok: true, market: day, removed });
+      } catch (e) {
+        return fail(e.message || "server error", 500);
+      }
+    }
+
     if (url.pathname !== "/sync") return fail("not found", 404);
 
     const stall = (url.searchParams.get("stall") || "").trim();
@@ -401,13 +483,22 @@ export default {
       await ensureSchema(env.DB);
 
       if (request.method === "GET") {
-        return json({ ok: true, ...(await changesSince(env.DB, stall, market, since)) });
+        return json({
+          ok: true,
+          sealed: await sealedAt(env.DB, stall, market),
+          ...(await changesSince(env.DB, stall, market, since)),
+        });
       }
 
       if (request.method === "POST") {
         let payload;
         try { payload = await request.json(); }
         catch { return fail("body must be JSON"); }
+
+        // Nothing gets written to a finished market, and the phone is told why
+        // rather than being left to think its push simply vanished.
+        const seal = await sealedAt(env.DB, stall, market);
+        if (seal) return fail(market + " is sealed and no longer takes changes", 409);
 
         const now = Date.now();
         const incoming = Array.isArray(payload?.rows)
@@ -424,7 +515,7 @@ export default {
         }, new Map()).values()];
 
         if (deduped.length) await applyRows(env.DB, stall, market, deduped);
-        return json({ ok: true, ...(await changesSince(env.DB, stall, market, since)) });
+        return json({ ok: true, sealed: null, ...(await changesSince(env.DB, stall, market, since)) });
       }
 
       return fail("method not allowed", 405);

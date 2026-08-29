@@ -240,5 +240,66 @@ check("and pushing the same file again changes nothing",
   (await push(BDAY, 0, bulk)).body.ok === true &&
   (await pull(BDAY, 0)).body.rows.length === 120);
 
+async function post(path, market, body) {
+  const res = await fetch(`${BASE}${path}?stall=${encodeURIComponent(STALL)}&market=${encodeURIComponent(market)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+console.log("\n19. A finished market can be sealed");
+const SDAY = "2026-11-01";
+await push(SDAY, 0, [entry("s1", "phoneA"), entry("s2", "phoneB")]);
+check("the day starts open", (await pull(SDAY, 0)).body.sealed === null, (await pull(SDAY, 0)).body.sealed);
+const sealRes = await post("/seal", SDAY, {});
+check("sealing is accepted", sealRes.status === 200 && !!sealRes.body.sealed, sealRes.body);
+const afterSeal = await pull(SDAY, 0);
+check("the day says it is sealed", !!afterSeal.body.sealed, afterSeal.body.sealed);
+check("and still hands over everything it holds", afterSeal.body.rows.length === 2, afterSeal.body.rows.length);
+const blocked = await push(SDAY, 0, [entry("s3", "phoneA")]);
+check("a push is refused", blocked.status === 409, blocked.status);
+check("with a reason a person could read", /sealed/.test(blocked.body.error || ""), blocked.body);
+check("and nothing was written", (await pull(SDAY, 0)).body.rows.length === 2);
+const edit = await push(SDAY, 0, [entry("s1", "phoneA", { note: "changed", ts: at(30) })]);
+check("editing what is already there is refused too", edit.status === 409, edit.status);
+check("the note is untouched",
+  (await pull(SDAY, 0)).body.rows.find(r => r.uid === "s1").note === "s1");
+const listed19 = await (await fetch(`${BASE}/markets?stall=${encodeURIComponent(STALL)}`)).json();
+check("the day list marks it sealed", !!listed19.markets.find(m => m.market === SDAY)?.sealed, listed19.markets.find(m => m.market === SDAY));
+check("and other days are not", listed19.markets.filter(m => m.market !== SDAY).every(m => !m.sealed));
+
+console.log("\n20. Sealing can be undone, deliberately");
+const unseal = await post("/seal", SDAY, { sealed: false });
+check("unsealing is accepted", unseal.status === 200 && unseal.body.sealed === null, unseal.body);
+const again = await push(SDAY, 0, [entry("s3", "phoneA")]);
+check("writes work again", again.status === 200, again.status);
+check("and the new customer landed", (await pull(SDAY, 0)).body.rows.length === 3);
+
+console.log("\n21. A day can be removed, if it is not sealed");
+const EDAY = "2026-11-08";
+await push(EDAY, 0, [entry("e1", "phoneA"), entry("e2", "phoneA"), entry("e3", "phoneA")]);
+check("three customers to remove", (await pull(EDAY, 0)).body.rows.length === 3);
+const noName = await post("/erase", EDAY, {});
+check("removing without naming the day is refused", noName.status === 400, noName.status);
+check("and it is all still there", (await pull(EDAY, 0)).body.rows.length === 3);
+await post("/seal", EDAY, {});
+const sealedErase = await post("/erase", EDAY, { confirm: EDAY });
+check("a sealed day cannot be removed", sealedErase.status === 409, sealedErase.status);
+check("still all there", (await pull(EDAY, 0)).body.rows.length === 3);
+await post("/seal", EDAY, { sealed: false });
+const erased = await post("/erase", EDAY, { confirm: EDAY });
+check("once unsealed it goes", erased.status === 200 && erased.body.removed === 3, erased.body);
+check("and the day is empty", (await pull(EDAY, 0)).body.rows.length === 0);
+const listed21 = await (await fetch(`${BASE}/markets?stall=${encodeURIComponent(STALL)}`)).json();
+check("it is gone from the day list", !listed21.markets.some(m => m.market === EDAY), listed21.markets.map(m => m.market));
+check("other days are untouched", listed21.markets.some(m => m.market === SDAY));
+
+console.log("\n22. A removed day can be started again from nothing");
+await push(EDAY, 0, [entry("e9", "phoneA")]);
+const restarted = (await pull(EDAY, 0)).body.rows;
+check("one customer", restarted.length === 1, restarted.length);
+check("numbered from one again, not from four", restarted[0].id === 1, restarted[0].id);
+
 console.log("\n" + pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);

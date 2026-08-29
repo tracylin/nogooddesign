@@ -15,8 +15,27 @@ POST /sync?stall=<key>&market=<day>&since=<cursor>   -> { cursor, rows }
 GET  /markets?stall=<key>                            -> every day, with counts
 GET  /export?stall=<key>&market=<day>&format=csv     -> that day as a file
 GET  /export?stall=<key>&market=<day>&format=json    -> the same, as JSON
+POST /seal?stall=<key>&market=<day>                  -> finish a day, or reopen it
+     body: { sealed: true | false }
+POST /erase?stall=<key>&market=<day>                 -> remove a day and its entries
+     body: { confirm: "<day>" }
 GET  /health                                         -> a liveness check
 ```
+
+### Finishing a market
+
+A sealed day refuses every write, from every phone, and says so with a 409. That
+guarantee has to live here rather than in the app: the other phone might be on a
+version that does not know about sealing yet. Reads and downloads are unaffected,
+and `/markets` and a `/sync` GET both report the seal so a phone can show it.
+
+Sealing can be undone, on purpose. Making it permanent would mean that sealing
+today's market by accident at eleven in the morning could not be fixed, which is
+a worse failure than the one sealing exists to prevent.
+
+`/erase` removes a day and everything counted on it, and is refused outright on a
+sealed day. It also refuses unless the body names the day, so a stray call
+cannot take one out.
 
 A push and a pull are the same round trip: the phone sends the entries it
 changed and gets back everything that changed anywhere else since its cursor.
