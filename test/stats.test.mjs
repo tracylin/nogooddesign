@@ -169,11 +169,31 @@ if (existsSync(fixture)) {
   // item. These sales kept no snapshot, so they resolve through the catalog and
   // the profit is worked out for the first time here.
   const appSrc = readFileSync(join(here, "..", "src", "App.jsx"), "utf8");
-  const catBlock = appSrc.slice(appSrc.indexOf("const CATALOG = ["), appSrc.indexOf("];", appSrc.indexOf("const CATALOG = [")) + 2);
-  const CATALOG = new Function(catBlock + "; return CATALOG;")();
-  check("every item in the catalog carries a cost",
-    CATALOG.length === 73 && CATALOG.every(c => typeof c.cost === "number"),
-    CATALOG.filter(c => typeof c.cost !== "number").map(c => c.id));
+  const at = appSrc.indexOf("const CATALOGS = [");
+  const catBlock = appSrc.slice(at, appSrc.indexOf("\n];", at) + 3);
+  const CATALOGS = new Function(catBlock + "\nreturn CATALOGS;")();
+  const catalogFor = day => {
+    let chosen = CATALOGS[0];
+    for (const c of CATALOGS) if (String(day) >= c.from) chosen = c;
+    return chosen.items;
+  };
+  const CATALOG = catalogFor("2026-03-21");
+  check("the day is read through the shelf it had, not the one in the shop now",
+    CATALOG.length === 73 && catalogFor("2026-09-05").length > 73,
+    [CATALOG.length, catalogFor("2026-09-05").length]);
+  check("a day before any catalog still gets one", catalogFor("2020-01-01").length === 73);
+  check("every item on every shelf carries a cost",
+    CATALOGS.every(c => c.items.every(i => typeof i.cost === "number")),
+    CATALOGS.flatMap(c => c.items).filter(i => typeof i.cost !== "number").map(i => i.id));
+  check("no id means two different things across the shelves", (() => {
+    const seen = new Map();
+    for (const c of CATALOGS) for (const i of c.items) {
+      const was = seen.get(i.id);
+      if (was && was !== i.name) return false;
+      seen.set(i.id, i.name);
+    }
+    return true;
+  })());
   const withCost = computeStats(rows, CATALOG);
   check("eleven of the twelve sales can be costed", withCost.profit.known === 11, withCost.profit);
   check("cost of goods is $115.38, the same figure the shop wrote down",
