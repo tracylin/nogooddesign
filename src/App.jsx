@@ -2143,13 +2143,17 @@ const S = {
     fontSize: 16, fontFamily: SANS, padding: "14px 0", outline: "none",
   },
   clearBtn: { background: "none", border: "none", color: BK, fontSize: 16, cursor: "pointer", padding: "4px 0 4px 8px" },
-  catRow: { display: "flex", gap: 0, flexShrink: 0, overflowX: "auto", WebkitOverflowScrolling: "touch" },
+  // Wraps rather than scrolls sideways: a hidden sideways scroll did not move on
+  // the phone, and with eleven categories most of them were simply out of
+  // reach. Every row stretches to the full width, and the last row's bottom
+  // line sits under the rule that follows instead of doubling it.
+  catRow: { display: "flex", flexWrap: "wrap", flexShrink: 0, marginBottom: -1 },
   catBtn: {
-    flex: "none", padding: "10px 16px", background: BG, border: "none", borderRight: `1px solid ${BK}`,
+    flex: "1 0 auto", padding: "10px 14px", background: BG, border: "none", borderRight: `1px solid ${BK}`, borderBottom: `1px solid ${BK}`,
     fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer", whiteSpace: "nowrap",
   },
   catActive: {
-    flex: "none", padding: "10px 16px", background: BK, border: "none", borderRight: `1px solid ${BK}`,
+    flex: "1 0 auto", padding: "10px 14px", background: BK, border: "none", borderRight: `1px solid ${BK}`, borderBottom: `1px solid ${BK}`,
     fontFamily: SANS, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap",
   },
   catalogScroll: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
