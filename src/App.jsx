@@ -1407,11 +1407,7 @@ export default function App() {
               <button style={S.closeBtn} onClick={() => { setShowCatalogPicker(null); setPickerCat("All"); }}>✕</button>
             </div>
             <div style={S.rule} />
-            <div style={S.catRow}>
-              {dayCategories.map(c => (
-                <button key={c} style={pickerCat === c ? S.catActive : S.catBtn} onClick={() => setPickerCat(c)}>{c}</button>
-              ))}
-            </div>
+            <CatRow items={dayCategories} active={pickerCat} onPick={setPickerCat} />
             <div style={S.rule} />
             <div style={S.pickerList}>
               {catalog.filter(c => pickerCat === "All" || c.category === pickerCat)
@@ -1939,6 +1935,96 @@ function Numbers({ stats, market }) {
   );
 }
 
+// The category bar. A finger drag is followed by hand, with a little glide when
+// it is let go, because the browser's own sideways scroll did not respond on
+// Cuixi's phone while it did on Wei's. A tap still picks; a drag never does.
+// A mouse or trackpad keeps the native scroll. The arrows say there is more.
+function CatRow({ items, active, onPick }) {
+  const ref = useRef(null);
+  const drag = useRef(null);
+  const glide = useRef(0);
+  const dragged = useRef(false);
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const left = el.scrollLeft > 2;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
+    setEdges(e => (e.left === left && e.right === right ? e : { left, right }));
+  }, []);
+
+  useEffect(() => {
+    measure();
+    window.addEventListener("resize", measure);
+    return () => { window.removeEventListener("resize", measure); cancelAnimationFrame(glide.current); };
+  }, [measure, items]);
+
+  // Whatever is picked stays in view, including a filter carried over from before.
+  useEffect(() => {
+    const el = ref.current;
+    const b = el && el.querySelector('[data-active="true"]');
+    if (b) {
+      const l = b.offsetLeft, r = l + b.offsetWidth;
+      if (l < el.scrollLeft) el.scrollLeft = Math.max(0, l - 28);
+      else if (r > el.scrollLeft + el.clientWidth) el.scrollLeft = r - el.clientWidth + 28;
+    }
+    measure();
+  }, [active, items, measure]);
+
+  const onPointerDown = e => {
+    if (e.pointerType === "mouse") return;
+    cancelAnimationFrame(glide.current);
+    dragged.current = false;
+    drag.current = { id: e.pointerId, x: e.clientX, left: ref.current.scrollLeft, t: e.timeStamp, v: 0, moved: false };
+  };
+  const onPointerMove = e => {
+    const d = drag.current;
+    if (!d || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.x;
+    if (!d.moved && Math.abs(dx) < 6) return;
+    if (!d.moved) { d.moved = true; dragged.current = true; try { ref.current.setPointerCapture(e.pointerId); } catch { /* fine without */ } }
+    const el = ref.current;
+    const before = el.scrollLeft;
+    el.scrollLeft = d.left - dx;
+    const dt = Math.max(1, e.timeStamp - d.t);
+    d.v = 0.8 * ((el.scrollLeft - before) / dt) + 0.2 * d.v;
+    d.t = e.timeStamp;
+    measure();
+  };
+  const onPointerUp = e => {
+    const d = drag.current;
+    if (!d || e.pointerId !== d.id) return;
+    drag.current = null;
+    if (!d.moved) return;
+    let v = d.v * 16;
+    const step = () => {
+      const el = ref.current;
+      if (!el || Math.abs(v) < 0.5) { measure(); return; }
+      el.scrollLeft += v;
+      v *= 0.92;
+      measure();
+      glide.current = requestAnimationFrame(step);
+    };
+    glide.current = requestAnimationFrame(step);
+  };
+
+  return (
+    <div style={S.catWrap}>
+      <div ref={ref} style={S.catRow} onScroll={measure}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
+        {items.map(c => (
+          <button key={c} data-active={active === c} style={active === c ? S.catActive : S.catBtn}
+            onClick={() => { if (dragged.current) { dragged.current = false; return; } onPick(c); }}>{c}</button>
+        ))}
+      </div>
+      {edges.left && <div style={{ ...S.catFade, left: 0, background: `linear-gradient(to right, ${BG} 55%, transparent)` }}>‹</div>}
+      {edges.right && <div style={{ ...S.catFade, right: 0, background: `linear-gradient(to left, ${BG} 55%, transparent)` }}>›</div>}
+    </div>
+  );
+}
+
 function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldOutIds, onPhoto, categories }) {
   const ref = useRef(null);
   return (
@@ -1949,11 +2035,7 @@ function PriceCheck({ search, setSearch, catFilter, setCatFilter, grouped, soldO
         {search && <button style={S.clearBtn} onClick={() => { setSearch(""); ref.current?.focus(); }}>✕</button>}
       </div>
       <div style={S.rule} />
-      <div style={S.catRow}>
-        {categories.map(c => (
-          <button key={c} style={catFilter === c ? S.catActive : S.catBtn} onClick={() => setCatFilter(c)}>{c}</button>
-        ))}
-      </div>
+      <CatRow items={categories} active={catFilter} onPick={setCatFilter} />
       <div style={S.rule} />
       <div style={S.catalogScroll}>
         {Object.keys(grouped).length === 0 && <div style={S.empty}>No matches</div>}
@@ -2143,17 +2225,24 @@ const S = {
     fontSize: 16, fontFamily: SANS, padding: "14px 0", outline: "none",
   },
   clearBtn: { background: "none", border: "none", color: BK, fontSize: 16, cursor: "pointer", padding: "4px 0 4px 8px" },
-  // Wraps rather than scrolls sideways: a hidden sideways scroll did not move on
-  // the phone, and with eleven categories most of them were simply out of
-  // reach. Every row stretches to the full width, and the last row's bottom
-  // line sits under the rule that follows instead of doubling it.
-  catRow: { display: "flex", flexWrap: "wrap", flexShrink: 0, marginBottom: -1 },
+  // One line that scrolls sideways. The finger is followed by CatRow itself
+  // rather than left to the browser: native sideways scrolling worked on one
+  // phone and not on the other, with the same app.
+  catWrap: { position: "relative", flexShrink: 0 },
+  catRow: {
+    display: "flex", overflowX: "auto", overflowY: "hidden", touchAction: "none",
+    scrollbarWidth: "none", overscrollBehaviorX: "contain", userSelect: "none", WebkitUserSelect: "none",
+  },
+  catFade: {
+    position: "absolute", top: 0, bottom: 0, width: 28, pointerEvents: "none",
+    display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, color: BK,
+  },
   catBtn: {
-    flex: "1 0 auto", padding: "10px 14px", background: BG, border: "none", borderRight: `1px solid ${BK}`, borderBottom: `1px solid ${BK}`,
+    flex: "none", padding: "10px 16px", background: BG, border: "none", borderRight: `1px solid ${BK}`,
     fontFamily: SANS, fontSize: 12, color: BK, cursor: "pointer", whiteSpace: "nowrap",
   },
   catActive: {
-    flex: "1 0 auto", padding: "10px 14px", background: BK, border: "none", borderRight: `1px solid ${BK}`, borderBottom: `1px solid ${BK}`,
+    flex: "none", padding: "10px 16px", background: BK, border: "none", borderRight: `1px solid ${BK}`,
     fontFamily: SANS, fontSize: 12, color: BG, fontWeight: 500, cursor: "pointer", whiteSpace: "nowrap",
   },
   catalogScroll: { flex: 1, overflow: "auto", WebkitOverflowScrolling: "touch" },
